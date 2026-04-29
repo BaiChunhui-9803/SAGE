@@ -540,6 +540,8 @@ def run_game(
             replay_actions=replay_actions,
             replay_runs=replay_runs,
             action_strategy=action_strategy,
+            data_dir=data_dir,
+            kg_file=kg_file,
         )
     else:
         agent1 = SmartAgent()

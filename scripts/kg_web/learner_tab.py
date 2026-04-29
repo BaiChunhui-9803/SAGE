@@ -26,10 +26,53 @@ import optuna
 from src import ROOT_DIR
 
 _RESULTS_DIR = ROOT_DIR / "output" / "learner_results"
-_RUNS_DIR = _RESULTS_DIR / "runs"
-_TRIALS_DIR = _RESULTS_DIR / "trials"
-_SUMMARY_PATH = _RESULTS_DIR / "study_summary.json"
-_STUDY_DB = _RESULTS_DIR / "study.db"
+_TRAINING_RUNS_DIR = _RESULTS_DIR / "training_runs"
+
+
+def _get_all_runs():
+    runs = []
+    legacy_db = _RESULTS_DIR / "study.db"
+    if legacy_db.exists():
+        runs.append(("run_0001", _RESULTS_DIR, True))
+    tr_dir = _TRAINING_RUNS_DIR
+    if tr_dir.exists():
+        for d in sorted(tr_dir.iterdir()):
+            if d.is_dir() and d.name.startswith("run_"):
+                db = d / "study.db"
+                if db.exists():
+                    runs.append((d.name, d, False))
+    return runs
+
+
+def _get_active_run_path():
+    sel = st.session_state.get("_active_run", None)
+    if not sel:
+        return None
+    if sel == "run_0001":
+        return _RESULTS_DIR
+    return _TRAINING_RUNS_DIR / sel
+
+
+def _get_active_study_db():
+    run_path = _get_active_run_path()
+    if run_path is None:
+        return None
+    return run_path / "study.db"
+
+
+def _get_active_runs_dir():
+    run_path = _get_active_run_path()
+    if run_path is None:
+        return None
+    return run_path / "runs"
+
+
+def _get_active_trials_dir():
+    run_path = _get_active_run_path()
+    if run_path is None:
+        return None
+    return run_path / "trials"
+
 
 _ACTION_STRATEGY_LABELS = {
     "best_beam": "Best Beam",
@@ -42,17 +85,25 @@ _ACTION_STRATEGY_LABELS = {
 
 
 def _load_summary():
-    if _SUMMARY_PATH.exists():
-        with open(str(_SUMMARY_PATH), "r", encoding="utf-8") as f:
-            return json.load(f)
+    run_path = _get_active_run_path()
+    if run_path is None:
+        return None
+    sp = run_path / "study_summary.json"
+    if sp.exists():
+        try:
+            with open(str(sp), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return None
 
 
 @st.cache_resource(ttl=60, show_spinner=False)
 def _load_study():
-    if _STUDY_DB.exists():
+    study_db = _get_active_study_db()
+    if study_db and study_db.exists():
         try:
-            storage = f"sqlite:///{_STUDY_DB}"
+            storage = f"sqlite:///{study_db}"
             study = optuna.load_study(study_name="beam_search", storage=storage)
             return study
         except Exception:
@@ -66,10 +117,13 @@ def _get_running_trial_number():
         return None
     if not _is_learner_alive():
         return None
+    study_db = _get_active_study_db()
+    if not study_db:
+        return None
     try:
         import sqlite3 as _sqlite
 
-        db = _sqlite.connect(str(_STUDY_DB))
+        db = _sqlite.connect(str(study_db))
         cur = db.cursor()
         cur.execute(
             "SELECT t.number FROM trials t WHERE t.state = 'RUNNING' ORDER BY t.number DESC LIMIT 1"
@@ -157,14 +211,17 @@ def _kill_port_process(port: int):
 
 
 def _delete_trial(trial_number: int):
-    run_json = _RUNS_DIR / f"trial_{trial_number:04d}_run.json"
-    run_log = _RUNS_DIR / f"trial_{trial_number:04d}.log"
-    run_json.unlink(missing_ok=True)
-    run_log.unlink(missing_ok=True)
-
-    trial_dir = _TRIALS_DIR / f"trial_{trial_number:04d}"
-    if trial_dir.is_dir():
-        shutil.rmtree(trial_dir, ignore_errors=True)
+    runs_dir = _get_active_runs_dir()
+    trials_dir = _get_active_trials_dir()
+    if runs_dir:
+        run_json = runs_dir / f"trial_{trial_number:04d}_run.json"
+        run_log = runs_dir / f"trial_{trial_number:04d}.log"
+        run_json.unlink(missing_ok=True)
+        run_log.unlink(missing_ok=True)
+    if trials_dir:
+        trial_dir = trials_dir / f"trial_{trial_number:04d}"
+        if trial_dir.is_dir():
+            shutil.rmtree(trial_dir, ignore_errors=True)
 
     study = _load_study()
     if not study:
@@ -183,173 +240,67 @@ def _delete_trial(trial_number: int):
             break
 
 
-_BATCH_RULES = [
-    (0, 499, 1),
-    (500, 1787, 2),
-]
-
-
-def _migrate_batches():
-    if not _STUDY_DB.exists():
-        return
-    import sqlite3 as _sqlite
-
-    try:
-        db = _sqlite.connect(str(_STUDY_DB))
-        cur = db.cursor()
-
-        cur.execute(
-            "SELECT value_json FROM study_user_attributes WHERE key = 'batch_migrated'"
-        )
-        row = cur.fetchone()
-        if row and row[0] == '"true"':
-            db.close()
-            return
-
-        cur.execute("SELECT study_id FROM studies WHERE study_name = 'beam_search'")
-        srow = cur.fetchone()
-        if not srow:
-            db.close()
-            return
-        study_id = srow[0]
-
-        cur.execute(
-            "SELECT t.trial_id, t.number FROM trials t WHERE t.state IN ('COMPLETE', 'FAIL')"
-        )
-        trials = cur.fetchall()
-
-        for trial_id, number in trials:
-            cur.execute(
-                "SELECT 1 FROM trial_user_attributes WHERE trial_id = ? AND key = 'batch'",
-                (trial_id,),
-            )
-            if cur.fetchone():
-                continue
-
-            batch = 0
-            for lo, hi, b in _BATCH_RULES:
-                if lo <= number <= hi:
-                    batch = b
-                    break
-            if batch > 0:
-                cur.execute(
-                    "INSERT OR IGNORE INTO trial_user_attributes (trial_id, key, value_json) VALUES (?, ?, ?)",
-                    (trial_id, "batch", str(batch)),
-                )
-
-        cur.execute(
-            "INSERT OR REPLACE INTO study_user_attributes (study_id, key, value_json) VALUES (?, ?, ?)",
-            (study_id, "batch_migrated", '"true"'),
-        )
-        db.commit()
-        db.close()
-
-        if _RUNS_DIR.exists():
-            for fp in _RUNS_DIR.glob("trial_*_run.json"):
-                try:
-                    data = json.loads(fp.read_text(encoding="utf-8"))
-                    if "batch" not in data or data["batch"] is None:
-                        tn = data.get("trial")
-                        if isinstance(tn, int):
-                            batch = 0
-                            for lo, hi, b in _BATCH_RULES:
-                                if lo <= tn <= hi:
-                                    batch = b
-                                    break
-                            if batch > 0:
-                                data["batch"] = batch
-                                with open(str(fp), "w", encoding="utf-8") as f:
-                                    json.dump(data, f, ensure_ascii=False, indent=2)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-
 @st.cache_data(ttl=120, show_spinner=False)
-def _get_batch_info():
-    if not _STUDY_DB.exists():
-        return {}
-    import sqlite3 as _sqlite
+def _get_run_info():
+    runs = _get_all_runs()
+    result = {}
+    for run_name, run_path, is_legacy in runs:
+        study_db = run_path / "study.db"
+        if not study_db.exists():
+            continue
+        import sqlite3 as _sqlite
 
-    try:
-        db = _sqlite.connect(str(_STUDY_DB))
-        cur = db.cursor()
-        cur.execute("""
-            SELECT tua.value_json, COUNT(*), MIN(t.number), MAX(t.number)
-            FROM trial_user_attributes tua
-            JOIN trials t ON tua.trial_id = t.trial_id
-            WHERE tua.key = 'batch' AND t.state IN ('COMPLETE', 'FAIL')
-            GROUP BY tua.value_json
-            ORDER BY tua.value_json
-        """)
-        rows = cur.fetchall()
-        db.close()
+        try:
+            db = _sqlite.connect(str(study_db))
+            cur = db.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM trials WHERE state IN ('COMPLETE', 'FAIL')"
+            )
+            count = cur.fetchone()[0]
+            cur.execute(
+                "SELECT MIN(number), MAX(number) FROM trials WHERE state IN ('COMPLETE', 'FAIL')"
+            )
+            row = cur.fetchone()
+            min_num = row[0] if row and row[0] is not None else 0
+            max_num = row[1] if row and row[1] is not None else 0
+            db.close()
+            result[run_name] = {
+                "count": count,
+                "min_trial": min_num,
+                "max_trial": max_num,
+                "path": run_path,
+                "is_legacy": is_legacy,
+            }
+        except Exception:
+            pass
+    return result
 
-        result = {}
-        for val_json, count, min_num, max_num in rows:
-            batch = int(val_json)
-            result[batch] = {"count": count, "min_trial": min_num, "max_trial": max_num}
-        return result
-    except Exception:
-        return {}
 
-
-def _delete_batch(batch_num: int):
-    import sqlite3 as _sqlite
-
-    db = _sqlite.connect(str(_STUDY_DB))
-    cur = db.cursor()
-
-    cur.execute(
-        """
-        SELECT t.number FROM trial_user_attributes tua
-        JOIN trials t ON tua.trial_id = t.trial_id
-        WHERE tua.key = 'batch' AND tua.value_json = ?
-    """,
-        (str(batch_num),),
-    )
-    trial_numbers = [row[0] for row in cur.fetchall()]
-
-    cur.execute(
-        """
-        SELECT t.trial_id FROM trial_user_attributes tua
-        JOIN trials t ON tua.trial_id = t.trial_id
-        WHERE tua.key = 'batch' AND tua.value_json = ?
-    """,
-        (str(batch_num),),
-    )
-    trial_ids = [row[0] for row in cur.fetchall()]
-
-    for tid in trial_ids:
-        for table in (
-            "trial_user_attributes",
-            "trial_system_attributes",
-            "trial_params",
-            "trial_values",
-            "trial_intermediate_values",
-            "trial_heartbeats",
-        ):
-            cur.execute(f"DELETE FROM {table} WHERE trial_id = ?", (tid,))
-        cur.execute("DELETE FROM trials WHERE trial_id = ?", (tid,))
-
-    db.commit()
-    db.close()
-
-    for tn in trial_numbers:
-        run_json = _RUNS_DIR / f"trial_{tn:04d}_run.json"
-        run_log = _RUNS_DIR / f"trial_{tn:04d}.log"
-        run_json.unlink(missing_ok=True)
-        run_log.unlink(missing_ok=True)
-        trial_dir = _TRIALS_DIR / f"trial_{tn:04d}"
-        if trial_dir.is_dir():
-            shutil.rmtree(trial_dir, ignore_errors=True)
-
-    _load_study.clear()
-    _compute_importance.clear()
-    _load_trials_from_db.clear()
-    _load_runs.clear()
-    _get_batch_info.clear()
+def _delete_run(run_name: str):
+    run_info = _get_run_info()
+    if run_name not in run_info:
+        return
+    info = run_info[run_name]
+    run_path = info["path"]
+    if run_path == _RESULTS_DIR:
+        study_db = run_path / "study.db"
+        if study_db.exists():
+            study_db.unlink()
+        runs_dir = run_path / "runs"
+        if runs_dir.exists():
+            for f in runs_dir.glob("trial_*_run.json"):
+                f.unlink(missing_ok=True)
+        trials_dir = run_path / "trials"
+        if trials_dir.exists():
+            for d in trials_dir.glob("trial_*"):
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+        sp = run_path / "study_summary.json"
+        sp.unlink(missing_ok=True)
+    else:
+        if run_path.exists():
+            shutil.rmtree(run_path, ignore_errors=True)
+    _clear_all_cache()
 
 
 def _clear_all_cache():
@@ -358,7 +309,7 @@ def _clear_all_cache():
         _compute_importance,
         _load_trials_from_db,
         _load_runs,
-        _get_batch_info,
+        _get_run_info,
         _load_finetune_runs,
     ):
         try:
@@ -368,13 +319,14 @@ def _clear_all_cache():
 
 
 def _export_all_data():
-    if not _STUDY_DB.exists():
+    study_db = _get_active_study_db()
+    if not study_db or not study_db.exists():
         st.toast("无数据可导出")
         return None
     import sqlite3 as _sqlite
 
     try:
-        db = _sqlite.connect(str(_STUDY_DB))
+        db = _sqlite.connect(str(study_db))
         cur = db.cursor()
         cur.execute("""
             SELECT t.number, t.state, tv.value
@@ -484,6 +436,10 @@ def _start_learner():
     episodes = st.session_state.get("learner_episodes", 100)
     trials = st.session_state.get("learner_trials", 50)
     masked = st.session_state.get("learner_masked_actions", [])
+    expanded_masked = []
+    for letter in masked:
+        for c in range(5):
+            expanded_masked.append(f"{c}{letter}")
 
     cmd = [
         sys.executable,
@@ -499,18 +455,47 @@ def _start_learner():
         cmd.extend(["--kg_file", kg_file])
     if kg_data_dir:
         cmd.extend(["--data_dir", kg_data_dir])
-    if masked:
-        cmd.extend(["--masked_actions", ",".join(masked)])
+    if expanded_masked:
+        cmd.extend(["--masked_actions", ",".join(expanded_masked)])
+
+    restart_interval = st.session_state.get("learner_restart_interval", 50)
+    if restart_interval > 0:
+        cmd.extend(["--restart_interval", str(restart_interval)])
+
+    alpha = st.session_state.get("learner_alpha", 0.2)
+    cap = st.session_state.get("learner_cap", 8.0)
+    _save_obj_config(alpha, cap)
+
+    _TRAINING_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    existing = [
+        d.name
+        for d in _TRAINING_RUNS_DIR.iterdir()
+        if d.is_dir() and d.name.startswith("run_")
+    ]
+    next_id = max((int(n.split("_")[1]) for n in existing), default=1) + 1
+    new_run_name = f"run_{next_id:04d}"
+    new_run_dir = _TRAINING_RUNS_DIR / new_run_name
+    st.session_state["_new_run_dir"] = str(new_run_dir)
+    st.session_state["_active_run"] = new_run_name
 
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    _RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    _TRIALS_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = _TRIALS_DIR / "learner.log"
+    run_dir = st.session_state.get("_new_run_dir", None)
+    if run_dir:
+        cmd.extend(["--run_dir", str(run_dir)])
+        Path(run_dir).mkdir(parents=True, exist_ok=True)
+        (Path(run_dir) / "runs").mkdir(parents=True, exist_ok=True)
+        (Path(run_dir) / "trials").mkdir(parents=True, exist_ok=True)
+        log_path = Path(run_dir) / "learner.log"
+    else:
+        (_RESULTS_DIR / "runs").mkdir(parents=True, exist_ok=True)
+        (_RESULTS_DIR / "trials").mkdir(parents=True, exist_ok=True)
+        log_path = _RESULTS_DIR / "trials" / "learner.log"
     log_file = open(str(log_path), "w", encoding="utf-8")
     st.session_state.learner_log_file = log_file
+    st.session_state._active_run_log = log_path
     flags = 0
     if sys.platform == "win32":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     p = subprocess.Popen(
         cmd,
         stdout=log_file,
@@ -548,10 +533,22 @@ def _start_rerun(trial_numbers):
     if kg_data_dir:
         cmd.extend(["--data_dir", kg_data_dir])
 
+    active_path = _get_active_run_path()
+    if active_path and active_path != _RESULTS_DIR:
+        cmd.extend(["--run_dir", str(active_path)])
+
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    _RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    _TRIALS_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = _TRIALS_DIR / "learner.log"
+    runs_dir = _get_active_runs_dir()
+    trials_dir = _get_active_trials_dir()
+    if runs_dir:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+    if trials_dir:
+        trials_dir.mkdir(parents=True, exist_ok=True)
+    log_path = (
+        (trials_dir / "learner.log")
+        if trials_dir
+        else (_RESULTS_DIR / "trials" / "learner.log")
+    )
     log_file = open(str(log_path), "w", encoding="utf-8")
     st.session_state.learner_log_file = log_file
     flags = 0
@@ -631,7 +628,7 @@ def _save_config_space(space: dict):
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
-def _save_obj_config(w_win, w_score, alpha, cap):
+def _save_obj_config(alpha, cap):
     cfg = {}
     if _CONFIG_PATH.exists():
         try:
@@ -640,8 +637,6 @@ def _save_obj_config(w_win, w_score, alpha, cap):
         except Exception:
             pass
     cfg.setdefault("objective", {})
-    cfg["objective"]["win_rate_weight"] = w_win
-    cfg["objective"]["avg_score_weight"] = w_score
     cfg["objective"]["stability_alpha"] = alpha
     cfg["objective"]["stability_cap"] = cap
     with open(str(_CONFIG_PATH), "w", encoding="utf-8") as f:
@@ -721,8 +716,8 @@ def _render_space_editor():
                 st.rerun()
 
 
-def _show_log(filename):
-    log_path = _RESULTS_DIR / filename
+def _show_log(filename, base_dir=None):
+    log_path = (base_dir or _RESULTS_DIR) / filename
     if not log_path.exists():
         st.info("日志文件不存在。")
         return
@@ -828,6 +823,15 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         key="learner_trials",
     )
 
+    st.number_input(
+        "重启间隔（每N轮重启游戏客户端）",
+        min_value=0,
+        max_value=500,
+        value=50,
+        key="learner_restart_interval",
+        help="0 = 不重启。定期重启可清除游戏进程内积累的状态，Optuna 模型不受影响",
+    )
+
     st.divider()
     st.markdown("**目标函数**")
 
@@ -840,22 +844,6 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         except Exception:
             pass
 
-    w_win = st.slider(
-        "胜率权重 (w_win)",
-        0.1,
-        1.0,
-        _obj_cfg.get("win_rate_weight", 0.8),
-        step=0.05,
-        key="learner_w_win",
-    )
-    w_score = st.slider(
-        "得分权重 (w_score)",
-        0.0,
-        0.9,
-        _obj_cfg.get("avg_score_weight", 0.2),
-        step=0.05,
-        key="learner_w_score",
-    )
     alpha = st.slider(
         "稳定性惩罚强度 (alpha)",
         0.0,
@@ -863,7 +851,7 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         _obj_cfg.get("stability_alpha", 0.5),
         step=0.05,
         key="learner_alpha",
-        help="0=不惩罚稳定性，1=极不稳定时得分项完全归零",
+        help="0=不惩罚稳定性，1=极不稳定时目标值完全归零",
     )
     cap = st.number_input(
         "稳定性归一化上限 (cap)",
@@ -875,31 +863,33 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         key="learner_cap",
         help="stability 归一化参考值，超过此值按 cap 计算",
     )
-    st.caption(
-        "公式: `win_rate×w_win + norm_score×w_score×max(1−α×min(stability/cap,1), 0)`"
-    )
+    st.caption("`win_rate x avg_score x max(1-alpha x min(stability/cap,1), 0)`")
 
     st.divider()
     st.markdown("**动作屏蔽**")
+    _ACTION_NAMES = [
+        "ATK_nearest",
+        "ATK_clu_nearest",
+        "ATK_nearest_weakest",
+        "ATK_clu_nearest_weakest",
+        "ATK_threatening",
+        "DEF_clu_nearest",
+        "MIX_gather",
+        "MIX_lure",
+        "MIX_sacrifice_lure",
+        "do_randomly",
+        "do_nothing",
+    ]
     _MASKED_ACTION_OPTIONS = {
-        "4a": "4a - ATK_nearest",
-        "4b": "4b - ATK_clu_nearest",
-        "4c": "4c - ATK_nearest_weakest",
-        "4d": "4d - ATK_clu_nearest_weakest",
-        "4e": "4e - ATK_threatening",
-        "4f": "4f - DEF_clu_nearest",
-        "4g": "4g - MIX_gather",
-        "4h": "4h - MIX_lure",
-        "4i": "4i - MIX_sacrifice_lure",
-        "4j": "4j - do_randomly",
-        "4k": "4k - do_nothing",
+        chr(ord("a") + a): f"{chr(ord('a') + a)} - {_ACTION_NAMES[a]}"
+        for a in range(len(_ACTION_NAMES))
     }
     st.multiselect(
-        "手动屏蔽动作（覆盖寻优参数）",
+        "手动屏蔽动作（按类别，覆盖所有聚类粒度）",
         options=list(_MASKED_ACTION_OPTIONS.keys()),
         format_func=lambda x: _MASKED_ACTION_OPTIONS.get(x, x),
         key="learner_masked_actions",
-        help="选择后，决策时将跳过这些动作，按 ranked_actions 顺位选下一个",
+        help="选择动作类别后，该动作在所有5种聚类粒度下均被屏蔽",
     )
 
     st.divider()
@@ -964,34 +954,37 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
     )
 
 
-def _get_filtered_trials(study, batch_selection="all"):
+def _get_filtered_trials(study):
     completed = _get_completed_trials(study, min_count=1)
-    if not completed or batch_selection == "all":
-        return completed
-    try:
-        target_batch = int(batch_selection)
-    except (ValueError, TypeError):
-        return completed
-    return [t for t in completed if t.user_attrs.get("batch") == target_batch]
+    return completed
 
 
-def _render_batch_selector(key="_analysis_batch"):
-    batch_info = _get_batch_info()
-    if not batch_info:
-        return "all"
-    options = ["all"] + [str(b) for b in sorted(batch_info.keys())]
-    labels = ["全部"] + [
-        f"Batch {b} ({batch_info[b]['count']}轮)" for b in sorted(batch_info.keys())
-    ]
-    idx = options.index(st.session_state.get(key, "all"))
+def _render_run_selector(key="_active_run"):
+    run_info = _get_run_info()
+    all_runs = _get_all_runs()
+    if not all_runs:
+        return None
+    options = [r[0] for r in all_runs]
+    labels = []
+    for run_name, _, is_legacy in all_runs:
+        info = run_info.get(run_name, {})
+        count = info.get("count", 0)
+        tag = " (legacy)" if is_legacy else ""
+        labels.append(f"{run_name} ({count} trials){tag}")
+    current = st.session_state.get(key, options[0])
+    if current not in options:
+        current = options[0]
+    prev = current
     sel = st.radio(
-        "分析范围",
+        "Training Run",
         options,
-        index=idx,
+        index=options.index(current),
         format_func=lambda x: labels[options.index(x)],
         horizontal=True,
         key=key,
     )
+    if sel != prev:
+        _clear_all_cache()
     return sel
 
 
@@ -1075,6 +1068,28 @@ def _render_conclusion_panel(filtered_trials):
     if mask_mc:
         from collections import Counter
 
+        _MASK_LETTERS = list("abcdefghijk")
+        _MASK_NAMES = [
+            "ATK_nearest",
+            "ATK_clu_nearest",
+            "ATK_nearest_weakest",
+            "ATK_clu_nearest_weakest",
+            "ATK_threatening",
+            "DEF_clu_nearest",
+            "MIX_gather",
+            "MIX_lure",
+            "MIX_sacrifice_lure",
+            "do_randomly",
+            "do_nothing",
+        ]
+
+        def _mask_label(v):
+            if v is None or not isinstance(v, int):
+                return "N/A"
+            if v < len(_MASK_LETTERS):
+                return f"{_MASK_LETTERS[v]} ({_MASK_NAMES[v]})"
+            return str(v)
+
         mc_mode = Counter(mask_mc).most_common(1)[0]
         mask_1_vals = [
             t.params.get("mask_1")
@@ -1089,10 +1104,15 @@ def _render_conclusion_panel(filtered_trials):
             and t.params.get("mask_0") is not None
         ]
         m1_mode = Counter(mask_1_vals).most_common(1)[0][0] if mask_1_vals else "N/A"
-        m0_range = f"{min(mask_0_vals)}-{max(mask_0_vals)}" if mask_0_vals else "N/A"
+        m0_min = min(mask_0_vals) if mask_0_vals else "N/A"
+        m0_max = max(mask_0_vals) if mask_0_vals else "N/A"
+        if isinstance(m0_min, int) and isinstance(m0_max, int):
+            m0_range = f"{_mask_label(m0_min)}-{_mask_label(m0_max)}"
+        else:
+            m0_range = "N/A"
         st.info(
             f"最优 mask 模式: **masked_count={mc_mode[0]}** ({mc_mode[1]}/{len(top_pct)} Top-10%), "
-            f"mask_1={m1_mode}, mask_0={m0_range}"
+            f"mask_1={_mask_label(m1_mode)}, mask_0={m0_range}"
         )
 
     if st.button("导出最优配置到 learner_config.yaml", key="export_best_config"):
@@ -1279,8 +1299,8 @@ def _get_trial_metrics(t) -> dict:
     }
 
 
-def _plot_numeric_correlation(study, batch_key="all"):
-    completed = _get_filtered_trials(study, batch_key)
+def _plot_numeric_correlation(study):
+    completed = _get_filtered_trials(study)
     if len(completed) < 5:
         st.info("完成的试验不足 5 轮。")
         return
@@ -1361,8 +1381,8 @@ def _plot_numeric_correlation(study, batch_key="all"):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _plot_categorical_effect(study, cat_key, batch_key="all"):
-    completed = _get_filtered_trials(study, batch_key)
+def _plot_categorical_effect(study, cat_key):
+    completed = _get_filtered_trials(study)
     if len(completed) < 3:
         st.info("试验数据不足。")
         return
@@ -1468,11 +1488,11 @@ def _plot_categorical_effect(study, cat_key, batch_key="all"):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _plot_parallel_coordinates(study, batch_key="all"):
+def _plot_parallel_coordinates(study):
     if not study:
         return
 
-    completed = _get_filtered_trials(study, batch_key)
+    completed = _get_filtered_trials(study)
     if len(completed) < 3:
         st.info("试验数据不足。")
         return
@@ -1554,10 +1574,10 @@ def _plot_parallel_coordinates(study, batch_key="all"):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _plot_slice(study, batch_key="all"):
+def _plot_slice(study):
     if not study:
         return
-    completed = _get_filtered_trials(study, batch_key)
+    completed = _get_filtered_trials(study)
     if len(completed) < 5:
         st.info("试验数据不足（至少 5 轮）。")
         return
@@ -1646,10 +1666,10 @@ def _compute_pair_importance(completed, importance):
     return all_pairs
 
 
-def _plot_contour(study, batch_key="all"):
+def _plot_contour(study):
     if not study:
         return []
-    completed = _get_filtered_trials(study, batch_key)
+    completed = _get_filtered_trials(study)
     if len(completed) < 10:
         st.info("试验数据不足（至少 10 轮）。")
         return []
@@ -1702,8 +1722,28 @@ def _plot_contour(study, batch_key="all"):
     return all_pairs
 
 
-def _plot_mask_heatmap(study, batch_key="all"):
-    completed = _get_filtered_trials(study, batch_key)
+def _plot_mask_heatmap(study):
+    _MASK_LETTERS = list("abcdefghijk")
+    _MASK_NAMES = [
+        "ATK_nearest",
+        "ATK_clu_nearest",
+        "ATK_nearest_weakest",
+        "ATK_clu_nearest_weakest",
+        "ATK_threatening",
+        "DEF_clu_nearest",
+        "MIX_gather",
+        "MIX_lure",
+        "MIX_sacrifice_lure",
+        "do_randomly",
+        "do_nothing",
+    ]
+
+    def _mask_label(v):
+        if v < len(_MASK_LETTERS):
+            return f"{_MASK_LETTERS[v]} ({_MASK_NAMES[v]})"
+        return str(v)
+
+    completed = _get_filtered_trials(study)
     masked = [
         t
         for t in completed
@@ -1735,8 +1775,8 @@ def _plot_mask_heatmap(study, batch_key="all"):
     fig = go.Figure(
         go.Heatmap(
             z=z_data,
-            x=[f"动作{v}" for v in x_labels],
-            y=[f"动作{v}" for v in y_labels],
+            x=[_mask_label(v) for v in x_labels],
+            y=[_mask_label(v) for v in y_labels],
             colorscale="Viridis",
             text=[[f"{v:.3f}" if v else "" for v in row] for row in z_data],
             texttemplate="%{text}",
@@ -1746,12 +1786,14 @@ def _plot_mask_heatmap(study, batch_key="all"):
     )
     fig.update_layout(
         height=340,
-        margin=dict(l=50, r=20, t=10, b=40),
+        margin=dict(l=110, r=20, t=10, b=110),
         xaxis_title="mask_0",
         yaxis_title="mask_1",
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("热力图: mask_0 × mask_1 的平均 objective（仅 masked_count>=2）")
+    st.caption(
+        "热力图: mask_0 x mask_1 的平均 objective（仅 masked_count>=2，按动作类别）"
+    )
 
 
 def _render_best_params(study, summary):
@@ -1806,12 +1848,13 @@ _CATEGORICAL_PARAM_MAP = {
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _load_trials_from_db():
-    if not _STUDY_DB.exists():
+    study_db = _get_active_study_db()
+    if not study_db or not study_db.exists():
         return []
     import sqlite3 as _sqlite
 
     try:
-        db = _sqlite.connect(str(_STUDY_DB))
+        db = _sqlite.connect(str(study_db))
         cur = db.cursor()
         cur.execute("""
             SELECT t.number, tv.value, tp.param_name, tp.param_value,
@@ -1857,8 +1900,8 @@ def _load_trials_from_db():
         )
 
     params_by_trial = {}
-    if _STUDY_DB.exists():
-        db2 = _sqlite.connect(str(_STUDY_DB))
+    if study_db and study_db.exists():
+        db2 = _sqlite.connect(str(study_db))
         cur2 = db2.cursor()
         cur2.execute("""
             SELECT t.number, tp.param_name, tp.param_value
@@ -2083,9 +2126,10 @@ def _render_trials_table():
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_runs():
     runs = []
-    if not _RUNS_DIR.exists():
+    runs_dir = _get_active_runs_dir()
+    if not runs_dir or not runs_dir.exists():
         return runs
-    for fp in sorted(_RUNS_DIR.glob("trial_*_run.json")):
+    for fp in sorted(runs_dir.glob("trial_*_run.json")):
         try:
             with open(str(fp), "r", encoding="utf-8") as f:
                 runs.append(json.load(f))
@@ -2103,7 +2147,10 @@ def _check_port_alive(port):
 
 
 def _read_trial_progress(trial_num, target_episodes):
-    progress_file = _TRIALS_DIR / f"trial_{trial_num:04d}" / "progress.json"
+    trials_dir = _get_active_trials_dir()
+    if not trials_dir:
+        return 0
+    progress_file = trials_dir / f"trial_{trial_num:04d}" / "progress.json"
     if not progress_file.exists():
         return 0
     try:
@@ -2156,7 +2203,7 @@ def _render_run_monitor():
 
     header_cols = st.columns([0.5, 1, 1, 1.5, 2.5, 1.5, 1, 1, 0.6, 0.6])
     header_labels = [
-        "批次",
+        "Run",
         "Trial",
         "端口",
         "时间",
@@ -2176,7 +2223,6 @@ def _render_run_monitor():
         status = run.get("status", "unknown")
         port = run.get("port", 0)
         target_episodes = run.get("target_episodes", 0)
-        batch = run.get("batch", "-") or "-"
 
         if status == "running":
             if isinstance(trial_num, int):
@@ -2216,7 +2262,7 @@ def _render_run_monitor():
             metric_str = "-"
 
         cols = st.columns([0.5, 1, 1, 1.5, 2.5, 1.5, 1, 1, 0.6, 0.6])
-        cols[0].caption(str(batch))
+        cols[0].caption(st.session_state.get("_active_run", "-"))
         cols[1].caption(f"#{trial_num}")
         cols[2].caption(str(port))
         cols[3].caption(run.get("start_time", ""))
@@ -2253,18 +2299,27 @@ def _render_run_monitor():
 
     st.divider()
 
-    learner_log = _TRIALS_DIR / "learner.log"
-    if learner_log.exists():
+    learner_log_path = None
+    trials_dir = _get_active_trials_dir()
+    if trials_dir:
+        learner_log_path = trials_dir / "learner.log"
+    if learner_log_path and learner_log_path.exists():
         if st.button("查看 learner.log", key="monitor_learner_log"):
-            _show_log("trials/learner.log")
+            active_run = st.session_state.get("_active_run", "")
+            if active_run == "run_0001":
+                _show_log("trials/learner.log")
+            else:
+                run_path = _get_active_run_path()
+                _show_log("trials/learner.log", base_dir=run_path)
 
     ep_options = []
-    for run in runs:
-        tn = run.get("trial")
-        if isinstance(tn, int):
-            ep_file = _TRIALS_DIR / f"trial_{tn:04d}" / "episodes.jsonl"
-            if ep_file.exists():
-                ep_options.append(tn)
+    if trials_dir:
+        for run in runs:
+            tn = run.get("trial")
+            if isinstance(tn, int):
+                ep_file = trials_dir / f"trial_{tn:04d}" / "episodes.jsonl"
+                if ep_file.exists():
+                    ep_options.append(tn)
     if ep_options:
         selected_tn = st.selectbox(
             "查看 Trial Episodes",
@@ -2272,8 +2327,8 @@ def _render_run_monitor():
             key="monitor_ep_select",
             format_func=lambda x: f"Trial #{x:04d}",
         )
-        if selected_tn is not None:
-            ep_path = _TRIALS_DIR / f"trial_{selected_tn:04d}" / "episodes.jsonl"
+        if selected_tn is not None and trials_dir:
+            ep_path = trials_dir / f"trial_{selected_tn:04d}" / "episodes.jsonl"
             try:
                 content = ep_path.read_text(encoding="utf-8", errors="replace")
                 lines = content.strip().split("\n")
@@ -2286,14 +2341,18 @@ def _render_run_monitor():
                 )
             except Exception as e:
                 st.error(f"读取失败: {e}")
-    if not learner_log.exists() and not ep_options:
+    if not (learner_log_path and learner_log_path.exists()) and not ep_options:
         st.caption("暂无日志文件。")
 
 
 def _render_learner_tab():
     st.markdown("### 在线协同训练：Beam Search 参数寻优 + 微调模型进化")
 
-    _migrate_batches()
+    if "_active_run" not in st.session_state:
+        all_runs = _get_all_runs()
+        st.session_state["_active_run"] = all_runs[0][0] if all_runs else None
+
+    _render_run_selector()
 
     summary = _load_summary()
     study = _load_study()
@@ -2332,69 +2391,72 @@ def _render_learner_tab():
         st.info("暂无优化数据。切换到「训练记录与启动」视图启动在线协同训练。")
 
     if study and len(study.trials) > 0:
-        batch_info = _get_batch_info()
+        run_info = _get_run_info()
 
-        with st.expander("批次管理", expanded=False):
-            if batch_info:
-                selected_batches = []
-                for batch_num in sorted(batch_info.keys()):
-                    info = batch_info[batch_num]
+        with st.expander("Run 管理", expanded=False):
+            if run_info:
+                selected_runs = []
+                for run_name in sorted(run_info.keys()):
+                    info = run_info[run_name]
                     checked = st.checkbox(
-                        f"批次 {batch_num}: {info['count']} 条 "
-                        f"(Trial #{info['min_trial']} - #{info['max_trial']})",
-                        key=f"_batch_sel_{batch_num}",
+                        f"{run_name}: {info['count']} trials "
+                        f"(#{info['min_trial']} - #{info['max_trial']})",
+                        key=f"_run_sel_{run_name}",
                     )
                     if checked:
-                        selected_batches.append(batch_num)
+                        selected_runs.append(run_name)
 
-                if selected_batches:
-                    st.caption(f"已选中 {len(selected_batches)} 个批次")
+                if selected_runs:
+                    st.caption(f"已选中 {len(selected_runs)} 个 run")
                     confirmed = st.checkbox(
-                        f"确认删除选中的 {len(selected_batches)} 个批次",
-                        key="_batch_delete_confirm",
+                        f"确认删除选中的 {len(selected_runs)} 个 run",
+                        key="_run_delete_confirm",
                     )
                     if st.button(
-                        f"删除选中的 {len(selected_batches)} 个批次",
+                        f"删除选中的 {len(selected_runs)} 个 run",
                         disabled=not confirmed,
                         type="primary" if confirmed else "secondary",
-                        key="_batch_delete_btn",
+                        key="_run_delete_btn",
                     ):
-                        total = 0
-                        for bn in selected_batches:
-                            info = batch_info[bn]
-                            total += info["count"]
-                            _delete_batch(bn)
+                        for rn in selected_runs:
+                            _delete_run(rn)
                         st.toast(
-                            f"已删除 {len(selected_batches)} 个批次（{total} 条）",
+                            f"已删除 {len(selected_runs)} 个 run",
                             icon="🗑️",
                         )
                         st.rerun()
             else:
-                st.info("暂无批次信息。")
+                st.info("暂无 run 信息。")
 
         col_reset, col_unlock, col_grefresh, col_export = st.columns([3, 2, 1, 1])
         with col_reset:
-            if st.button("重置数据库（清除所有试验记录）", key="learner_reset_db"):
-                try:
-                    optuna.delete_study(
-                        study_name="beam_search", storage=f"sqlite:///{_STUDY_DB}"
-                    )
-                    for f in _RUNS_DIR.glob("trial_*_run.json"):
+            active_run = st.session_state.get("_active_run")
+            if st.button("重置当前 Run 数据", key="learner_reset_db"):
+                study_db = _get_active_study_db()
+                if study_db and study_db.exists():
+                    try:
+                        optuna.delete_study(
+                            study_name="beam_search", storage=f"sqlite:///{study_db}"
+                        )
+                    except Exception:
+                        pass
+                    study_db.unlink(missing_ok=True)
+                runs_dir = _get_active_runs_dir()
+                if runs_dir:
+                    for f in runs_dir.glob("trial_*_run.json"):
                         f.unlink(missing_ok=True)
-                    for d in _TRIALS_DIR.glob("trial_*"):
+                trials_dir = _get_active_trials_dir()
+                if trials_dir:
+                    for d in trials_dir.glob("trial_*"):
                         if d.is_dir():
                             shutil.rmtree(d, ignore_errors=True)
-                    if _SUMMARY_PATH.exists():
-                        _SUMMARY_PATH.unlink()
-                    st.toast("数据库已重置", icon="🗑️")
-                    _load_study.clear()
-                    _compute_importance.clear()
-                    _load_trials_from_db.clear()
-                    _load_runs.clear()
-                    _get_batch_info.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"重置失败: {e}")
+                run_path = _get_active_run_path()
+                if run_path:
+                    sp = run_path / "study_summary.json"
+                    sp.unlink(missing_ok=True)
+                st.toast("数据已重置", icon="🗑️")
+                _clear_all_cache()
+                st.rerun()
         with col_unlock:
             if st.button("清除进程锁定", key="learner_unlock"):
                 if _PID_FILE.exists():
@@ -2410,11 +2472,7 @@ def _render_learner_tab():
                 st.rerun()
         with col_grefresh:
             if st.button("刷新状态", key="learner_refresh_status"):
-                _load_study.clear()
-                _load_runs.clear()
-                _load_trials_from_db.clear()
-                _compute_importance.clear()
-                _get_batch_info.clear()
+                _clear_all_cache()
                 st.rerun()
         with col_export:
             _render_export_button()
@@ -2442,8 +2500,7 @@ def _render_learner_tab():
         _plot_objective_history(study)
 
     elif active_view == "参数分析":
-        batch_key = _render_batch_selector("_analysis_batch")
-        filtered = _get_filtered_trials(study, batch_key)
+        filtered = _get_filtered_trials(study)
         _render_conclusion_panel(filtered)
         col_left, col_right = st.columns([3, 2])
         with col_left:
@@ -2451,29 +2508,28 @@ def _render_learner_tab():
             with left_l:
                 _plot_importance(study)
             with left_r:
-                _plot_numeric_correlation(study, batch_key)
+                _plot_numeric_correlation(study)
         with col_right:
             cat_row1_a, cat_row1_b = st.columns(2)
             with cat_row1_a:
-                _plot_categorical_effect(study, "mode", batch_key)
+                _plot_categorical_effect(study, "mode")
             with cat_row1_b:
-                _plot_categorical_effect(study, "score_mode", batch_key)
+                _plot_categorical_effect(study, "score_mode")
             cat_row2_a, cat_row2_b = st.columns(2)
             with cat_row2_a:
-                _plot_categorical_effect(study, "action_strategy", batch_key)
+                _plot_categorical_effect(study, "action_strategy")
             with cat_row2_b:
-                _plot_categorical_effect(study, "enable_backup", batch_key)
+                _plot_categorical_effect(study, "enable_backup")
             cat_row3_a, cat_row3_b = st.columns(2)
             with cat_row3_a:
-                _plot_categorical_effect(study, "masked_count", batch_key)
+                _plot_categorical_effect(study, "masked_count")
             with cat_row3_b:
-                _plot_mask_heatmap(study, batch_key)
+                _plot_mask_heatmap(study)
 
     elif active_view == "参数关系":
-        batch_key = _render_batch_selector("_relation_batch")
-        _plot_parallel_coordinates(study, batch_key)
+        _plot_parallel_coordinates(study)
         st.divider()
-        _plot_slice(study, batch_key)
+        _plot_slice(study)
         with st.expander("参数等高线图", expanded=False):
             importance = _compute_importance() or {}
             if importance:
@@ -2492,7 +2548,7 @@ def _render_learner_tab():
                     use_container_width=True,
                     hide_index=True,
                 )
-            all_pairs = _plot_contour(study, batch_key)
+            all_pairs = _plot_contour(study)
             if all_pairs:
                 import pandas as _pd
 
@@ -2935,7 +2991,9 @@ def _render_finetune_tab():
             _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
             _FINETUNE_DIR.mkdir(parents=True, exist_ok=True)
             _FINETUNE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-            _TRIALS_DIR.mkdir(parents=True, exist_ok=True)
+            td = _get_active_trials_dir()
+            if td:
+                td.mkdir(parents=True, exist_ok=True)
 
             log_path = _FINETUNE_DIR / "finetune_trainer.log"
             log_file = open(str(log_path), "w", encoding="utf-8")

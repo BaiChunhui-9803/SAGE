@@ -47,10 +47,8 @@ search_space:
   - 0
   - 3
 objective:
-  win_rate_weight: 0.8
-  avg_score_weight: 0.2
-  stability_alpha: 0.5
-  stability_cap: 5.0
+  stability_alpha: 0.2
+  stability_cap: 8.0
   stability_segments: 5
 execution:
   episodes_per_trial: 100
@@ -60,6 +58,7 @@ execution:
   completion_poll_interval: 5
   completion_timeout_minutes: 60
   save_timeout_seconds: 30
+  restart_interval: 50
 game:
   map_key: sce-1
   kg_file: null

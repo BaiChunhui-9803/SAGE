@@ -72,19 +72,28 @@ class KGGuidedAgent(SmartAgent):
         replay_actions: Optional[List[str]] = None,
         replay_runs: int = 1,
         action_strategy: str = "best_beam",
+        data_dir: Optional[str] = None,
+        kg_file: Optional[str] = None,
     ):
         super(KGGuidedAgent, self).__init__()
         self.bridge = bridge
         self._fallback_action = fallback_action
+        self._data_dir = data_dir
+        self._kg_file = kg_file
         self._prev_state_cluster: Optional[Tuple[int, int]] = None
         self._last_action_executed: str = ""
         self._action_history: List[Dict[str, Any]] = []
         self._pending_cluster: Optional[str] = None
         self._bktree_loaded = False
         self._state_id_map = state_id_map or {}
+        self._nid_to_ps: Dict[int, Tuple[int, int]] = {
+            v: k for k, v in self._state_id_map.items()
+        }
+        self._nid_norm_states: Dict[int, dict] = {}
+        self._nid_norm_states_loaded: bool = False
+        self._nid_fallback_cache: Dict[Tuple[int, int], int] = {}
         self._ep_history: List[Dict[str, Any]] = []
         self._prev_end_game_flag: bool = False
-
         self.kg = kg
         self.transitions = transitions
         self._dist_matrix = dist_matrix
@@ -117,6 +126,7 @@ class KGGuidedAgent(SmartAgent):
         self._log_interval: int = 50
         self._log_counters: Dict[str, int] = {
             "nid_none": 0,
+            "nid_fallback": 0,
             "fallback": 0,
             "kg_plan": 0,
             "kg_follow": 0,
@@ -124,6 +134,7 @@ class KGGuidedAgent(SmartAgent):
             "ft_plan": 0,
             "kg_relaxed": 0,
             "fuzzy_plan": 0,
+            "terminal_fix": 0,
             "total": 0,
         }
 
@@ -477,7 +488,9 @@ class KGGuidedAgent(SmartAgent):
             plan.ranked_actions,
         )
 
-    def _local_decide(self, state_id: int) -> Tuple[Optional[str], str, Optional[Dict]]:
+    def _local_decide(
+        self, state_id: int, enemy_count: int = 0
+    ) -> Tuple[Optional[str], str, Optional[Dict]]:
         if self.kg is None or self.transitions is None:
             return None, "fallback", None
 
@@ -563,6 +576,7 @@ class KGGuidedAgent(SmartAgent):
             self._planned_states = states
             self._ranked_actions = ranked
             self._plan_idx = 0
+
             plan_snap = {
                 "state_id": state_id,
                 "action_plan": actions,
@@ -591,8 +605,13 @@ class KGGuidedAgent(SmartAgent):
                 else:
                     action = self._resolve_action(self._fallback_action)
                     if action:
+                        _ci = (
+                            str(self._prev_state_cluster[0])
+                            if self._prev_state_cluster
+                            else "4"
+                        )
                         action_code = (
-                            "4" + chr(ord("a") + self.actions.index(action))
+                            _ci + chr(ord("a") + self.actions.index(action))
                             if action in self.actions
                             else action
                         )
@@ -685,7 +704,7 @@ class KGGuidedAgent(SmartAgent):
             )
         self._frame_count += 1
 
-    def _flush_ep_batch(self):
+    def _flush_ep_batch(self, counters_snapshot=None):
         if not self._ep_batch:
             return
         if self._local_result_dir:
@@ -697,7 +716,7 @@ class KGGuidedAgent(SmartAgent):
             ep_file = result_dir / "episodes.jsonl"
             progress_file = result_dir / "progress.json"
             with open(str(ep_file), "a", encoding="utf-8") as f:
-                trial_number = self._beam_params.get("trial_number")
+                trial_number = getattr(self, "_flush_trial_number", None)
                 for ep in self._ep_batch:
                     record = {
                         "episode_id": ep.get("episode_id", 0),
@@ -709,12 +728,42 @@ class KGGuidedAgent(SmartAgent):
                         record["trial_number"] = trial_number
                     f.write(_json.dumps(record, ensure_ascii=False) + "\n")
                     self._local_completed += 1
+            hp_file = result_dir / "episodes_hp.jsonl"
+            with open(str(hp_file), "a", encoding="utf-8") as f:
+                trial_number = getattr(self, "_flush_trial_number", None)
+                for ep in self._ep_batch:
+                    frames = ep.get("frames", [])
+                    steps = []
+                    for i, fr in enumerate(frames):
+                        steps.append(
+                            {
+                                "frame": i,
+                                "nid": fr.get("nid"),
+                                "state_cluster": fr.get("state_cluster"),
+                                "hp_my": fr.get("hp_my", 0),
+                                "hp_enemy": fr.get("hp_enemy", 0),
+                                "hp_delta": fr.get("hp_delta", 0),
+                                "action_code": fr.get("action_code", ""),
+                                "action_source": fr.get("action_source", ""),
+                                "my_count": fr.get("my_count", 0),
+                                "enemy_count": fr.get("enemy_count", 0),
+                            }
+                        )
+                    hp_record = {
+                        "episode_id": ep.get("episode_id", 0),
+                        "result": ep.get("result", "Unknown"),
+                        "final_score": ep.get("score", 0),
+                        "steps": steps,
+                    }
+                    if trial_number is not None:
+                        hp_record["trial_number"] = trial_number
+                    f.write(_json.dumps(hp_record, ensure_ascii=False) + "\n")
             target = self._beam_params.get("target_episodes", 0)
             progress = {"completed": self._local_completed}
             if target > 0:
                 progress["target"] = target
             if self._local_completed > 0:
-                c = self._log_counters
+                c = counters_snapshot if counters_snapshot else self._log_counters
                 total = max(c.get("total", 1), 1)
                 progress["fallback_ratio"] = round(
                     (c.get("fallback", 0) + c.get("nid_none", 0)) / total, 4
@@ -736,6 +785,8 @@ class KGGuidedAgent(SmartAgent):
                     "kg_plan",
                     "kg_follow",
                     "fallback",
+                    "terminal_fix",
+                    "nid_fallback",
                 ):
                     if k in c:
                         progress[k] = c[k]
@@ -782,8 +833,8 @@ class KGGuidedAgent(SmartAgent):
     def _load_kg_sam(self) -> None:
         if self._kg_sam is not None:
             return
-        kg_file = self._beam_params.get("kg_file")
-        data_dir = self._beam_params.get("data_dir")
+        kg_file = self._kg_file or self._beam_params.get("kg_file")
+        data_dir = self._data_dir or self._beam_params.get("data_dir")
         if not kg_file or not data_dir:
             return
         try:
@@ -801,6 +852,103 @@ class KGGuidedAgent(SmartAgent):
                 print(f"[KG-SAM] loaded {len(sam)} states for ETG reward", flush=True)
         except Exception as e:
             print(f"[WARN] failed to load kg_sam: {e}", flush=True)
+
+    def _load_nid_norm_states(self) -> None:
+        if self._nid_norm_states_loaded:
+            return
+        self._nid_norm_states_loaded = True
+        data_dir = self._data_dir or self._beam_params.get("data_dir")
+        if not data_dir:
+            return
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            bktree_dir = _Path(data_dir) / "bktree"
+            if not bktree_dir.exists():
+                return
+
+            def _collect_nodes(node):
+                nodes = []
+                if node is not None:
+                    nodes.append(node)
+                    for child in node.get("children", {}).values():
+                        nodes.extend(_collect_nodes(child))
+                return nodes
+
+            secondary_states: dict = {}
+            for sf in bktree_dir.glob("secondary_bktree_*.json"):
+                cid_str = sf.stem.replace("secondary_bktree_", "")
+                try:
+                    with open(str(sf), "r") as f:
+                        root = _json.load(f)
+                    p_id = int(cid_str)
+                    for node in _collect_nodes(root):
+                        s_id = node.get("cluster_id")
+                        st = node.get("state")
+                        if s_id is not None and st is not None:
+                            secondary_states[(p_id, s_id)] = st
+                except Exception:
+                    pass
+
+            primary_file = bktree_dir / "primary_bktree.json"
+            if primary_file.exists():
+                with open(str(primary_file), "r") as f:
+                    root = _json.load(f)
+                for node in _collect_nodes(root):
+                    p_id = node.get("cluster_id")
+                    if p_id is not None:
+                        for (pk, sk), nid in self._state_id_map.items():
+                            if pk == p_id and (pk, sk) in secondary_states:
+                                self._nid_norm_states[nid] = secondary_states[(pk, sk)]
+
+            print(
+                f"[NID-NORM] loaded {len(self._nid_norm_states)} nid norm_states, "
+                f"{len(secondary_states)} secondary states",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[WARN] failed to load nid_norm_states: {e}", flush=True)
+
+    def _resolve_nid(
+        self, p: int, s: int, state_norm=None
+    ) -> Tuple[Optional[int], bool]:
+        nid = self._state_id_map.get((p, s))
+        if nid is not None:
+            return nid, False
+
+        cached = self._nid_fallback_cache.get((p, s))
+        if cached is not None:
+            return cached, True
+
+        if state_norm is not None and self._nid_norm_states:
+            from src.structure.custom_distance_sc2 import DistributionDistance
+
+            best_nid = None
+            best_dist = float("inf")
+            best_hp = float("inf")
+            for nid_cand, stored in self._nid_norm_states.items():
+                ps = self._nid_to_ps.get(nid_cand)
+                if ps is None or ps[0] != p:
+                    continue
+                try:
+                    d, h = DistributionDistance(state_norm, stored)()
+                    if d < best_dist or (d == best_dist and h < best_hp):
+                        best_dist = d
+                        best_hp = h
+                        best_nid = nid_cand
+                except Exception:
+                    pass
+            if best_nid is not None:
+                self._nid_fallback_cache[(p, s)] = best_nid
+                print(
+                    f"[NID-FALLBACK] (p,s)=({p},{s}) -> nid={best_nid} "
+                    f"dist={best_dist:.3f}",
+                    flush=True,
+                )
+                return best_nid, True
+
+        return None, False
 
     def _etg_recalibrate(self) -> None:
         model = self._get_finetune_model()
@@ -852,6 +1000,7 @@ class KGGuidedAgent(SmartAgent):
                 if "local_result_dir" in new_params:
                     self._local_result_dir = new_params["local_result_dir"]
                     self._local_completed = 0
+                    self._flush_trial_number = new_params.get("trial_number")
                 self._beam_params.update(new_params)
                 if "trial_number" in new_params:
                     self.bridge.confirm_params(new_params["trial_number"])
@@ -978,7 +1127,10 @@ class KGGuidedAgent(SmartAgent):
         self._push_status(obs, str(state_cluster), my_units, enemy_units)
 
         p, s = int(state_cluster[0]), int(state_cluster[1])
-        nid = self._state_id_map.get((p, s))
+        nid, nid_fb = self._resolve_nid(p, s, state_norm)
+        if nid is None and not self._nid_norm_states_loaded:
+            self._load_nid_norm_states()
+            nid, nid_fb = self._resolve_nid(p, s, state_norm)
         action_code = "4c"
         action_to_execute = None
         action_source = "fallback"
@@ -986,6 +1138,9 @@ class KGGuidedAgent(SmartAgent):
 
         hp_my = int(sum(u.health for u in my_units))
         hp_enemy = int(sum(u.health for u in enemy_units))
+        hp_delta = 0
+        if self._prev_hp_my is not None:
+            hp_delta = (hp_my - self._prev_hp_my) - (hp_enemy - self._prev_hp_enemy)
 
         if self._mode == "replay":
             replay_action = self._get_next_replay_action()
@@ -1017,7 +1172,18 @@ class KGGuidedAgent(SmartAgent):
                 return sc2_actions.RAW_FUNCTIONS.no_op()
 
         elif self._mode != "replay" and nid is not None:
-            action_code_raw, evt_type, plan_snap = self._local_decide(nid)
+            action_code_raw, evt_type, plan_snap = self._local_decide(
+                nid, enemy_count=len(enemy_units)
+            )
+            if (
+                action_code_raw is not None
+                and len(enemy_units) <= 1
+                and action_code_raw != "4b"
+            ):
+                self._log_counters["terminal_fix"] = (
+                    self._log_counters.get("terminal_fix", 0) + 1
+                )
+                action_code_raw = "4b"
             if action_code_raw is not None:
                 resolved = self._resolve_action(action_code_raw)
                 if resolved is not None:
@@ -1032,14 +1198,22 @@ class KGGuidedAgent(SmartAgent):
                 action_source = "fallback"
 
         if action_to_execute is None:
-            action_to_execute = self._resolve_action(self._fallback_action)
-            if action_to_execute is None:
-                action_to_execute = "action_ATK_nearest_weakest"
-            action_source = "fallback"
+            if len(enemy_units) <= 1:
+                action_to_execute = self._resolve_action("4b")
+                action_source = "terminal_fix"
+                self._log_counters["terminal_fix"] = (
+                    self._log_counters.get("terminal_fix", 0) + 1
+                )
+            else:
+                action_to_execute = self._resolve_action(self._fallback_action)
+                if action_to_execute is None:
+                    action_to_execute = "action_ATK_nearest_weakest"
+                action_source = "fallback"
 
         if action_source == "fallback" and action_to_execute in self.actions:
             a_idx = self.actions.index(action_to_execute)
-            action_code = "4" + chr(ord("a") + a_idx)
+            _ci = str(self._prev_state_cluster[0]) if self._prev_state_cluster else "4"
+            action_code = _ci + chr(ord("a") + a_idx)
 
         self._last_action_executed = action_to_execute
         self._record_action(state_cluster, action_to_execute, action_source)
@@ -1049,6 +1223,8 @@ class KGGuidedAgent(SmartAgent):
             c["total"] += 1
             if nid is None:
                 c["nid_none"] += 1
+            if nid_fb:
+                c["nid_fallback"] = c.get("nid_fallback", 0) + 1
             key = action_source if action_source in c else "fallback"
             c[key] = c.get(key, 0) + 1
             if c["total"] % self._log_interval == 0:
@@ -1060,7 +1236,7 @@ class KGGuidedAgent(SmartAgent):
                     + c.get("fallback", 0)
                 )
                 print(
-                    f"[SUMMARY] frames={c['total']} | nid_none={c['nid_none']} | "
+                    f"[SUMMARY] frames={c['total']} | nid_none={c['nid_none']} nid_fb={c.get('nid_fallback', 0)} | "
                     f"exploit={exploit} "
                     f"(kg_plan={c.get('kg_plan', 0)} kg_follow={c.get('kg_follow', 0)}) | "
                     f"explore={explore} "
@@ -1087,6 +1263,7 @@ class KGGuidedAgent(SmartAgent):
                     "enemy_count": len(enemy_units),
                     "hp_my": hp_my,
                     "hp_enemy": hp_enemy,
+                    "hp_delta": hp_delta,
                     "game_loop": int(obs.observation.game_loop[0]),
                     "end_game_flag": self.end_game_flag,
                     "plan": plan_snap,
@@ -1137,8 +1314,9 @@ class KGGuidedAgent(SmartAgent):
         end_flag = self.end_game_flag
         if end_flag and not self._prev_end_game_flag:
             if self._ep_history:
+                _ep_counters = dict(self._log_counters)
+                c = self._log_counters
                 if self._mode != "replay":
-                    c = self._log_counters
                     exploit_count = c.get("kg_plan", 0) + c.get("kg_follow", 0)
                     explore_count = (
                         c.get("ft_plan", 0)
@@ -1154,7 +1332,7 @@ class KGGuidedAgent(SmartAgent):
                         f"explore={explore_count} "
                         f"(ft_plan={c.get('ft_plan', 0)} kg_relaxed={c.get('kg_relaxed', 0)} "
                         f"fuzzy_plan={c.get('fuzzy_plan', 0)} fallback={c.get('fallback', 0)}) | "
-                        f"nid_none={c['nid_none']}",
+                        f"terminal_fix={c.get('terminal_fix', 0)} nid_none={c['nid_none']} nid_fb={c.get('nid_fallback', 0)}",
                         flush=True,
                     )
 
@@ -1190,20 +1368,20 @@ class KGGuidedAgent(SmartAgent):
                     for k in self._log_counters:
                         self._log_counters[k] = 0
                     self._ep_action_log = []
-                if self.ctx:
-                    self.ctx.episode_count += 1
-                ep_id = self.ctx.episode_count if self.ctx else 0
-                self._ep_batch.append(
-                    {
-                        "episode_id": ep_id,
-                        "frames": list(self._ep_history),
-                        "result": self.end_game_state,
-                        "score": float(hp_my - hp_enemy),
-                    }
-                )
-                self._ep_history = []
-                self._replay_frame_count = 0
-                self._flush_ep_batch()
+            if self.ctx:
+                self.ctx.episode_count += 1
+            ep_id = self.ctx.episode_count if self.ctx else 0
+            self._ep_batch.append(
+                {
+                    "episode_id": ep_id,
+                    "frames": list(self._ep_history),
+                    "result": self.end_game_state,
+                    "score": float(hp_my - hp_enemy),
+                }
+            )
+            self._ep_history = []
+            self._replay_frame_count = 0
+            self._flush_ep_batch(counters_snapshot=_ep_counters)
         self._prev_end_game_flag = end_flag
 
         if self._pending_cluster and hasattr(self, self._pending_cluster):

@@ -1211,8 +1211,8 @@ def create_app(bridge: GameBridge) -> FastAPI:
         )
 
     @app.post("/game/load_kg")
-    async def load_kg(kg_file: str = Query(...)):
-        success = _instance.load_kg(kg_file)
+    async def load_kg(kg_file: str = Query(...), data_dir: Optional[str] = Query(None)):
+        success = _instance.load_kg(kg_file, data_dir=data_dir or None)
         if not success:
             raise HTTPException(status_code=400, detail="Failed to load KG file.")
         return {"status": "loaded", "kg_file": kg_file}

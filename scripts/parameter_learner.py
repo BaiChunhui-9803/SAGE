@@ -341,24 +341,17 @@ def _sample_params(trial: optuna.Trial, space: dict, cfg: dict = None) -> dict:
         masked_count = trial.suggest_int(
             "masked_count", space["masked_count"][0], space["masked_count"][1]
         )
-        masked_actions = []
-        all_actions = [
-            "4a",
-            "4b",
-            "4c",
-            "4d",
-            "4e",
-            "4f",
-            "4g",
-            "4h",
-            "4i",
-            "4j",
-            "4k",
-        ]
+        _ACTION_LETTERS = list("abcdefghijk")
+        masked_letters = []
         for i in range(masked_count):
-            choice = trial.suggest_int(f"mask_{i}", 0, len(all_actions) - 1)
-            if all_actions[choice] not in masked_actions:
-                masked_actions.append(all_actions[choice])
+            choice = trial.suggest_int(f"mask_{i}", 0, len(_ACTION_LETTERS) - 1)
+            letter = _ACTION_LETTERS[choice]
+            if letter not in masked_letters:
+                masked_letters.append(letter)
+        masked_actions = []
+        for letter in masked_letters:
+            for c in range(5):
+                masked_actions.append(f"{c}{letter}")
         params["masked_actions"] = masked_actions
     else:
         params["masked_actions"] = []
@@ -370,13 +363,18 @@ def _sample_params(trial: optuna.Trial, space: dict, cfg: dict = None) -> dict:
 
 
 class ParameterLearner:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, run_dir: str = None):
         self.cfg = cfg
-        self.results_dir = Path(
-            cfg["storage"].get("results_dir", "output/learner_results")
-        )
-        self.runs_dir = self.results_dir / "runs"
-        self.trials_dir = self.results_dir / "trials"
+        if run_dir:
+            self.results_dir = Path(run_dir)
+            self.runs_dir = self.results_dir / "runs"
+            self.trials_dir = self.results_dir / "trials"
+        else:
+            self.results_dir = Path(
+                cfg["storage"].get("results_dir", "output/learner_results")
+            )
+            self.runs_dir = self.results_dir / "runs"
+            self.trials_dir = self.results_dir / "trials"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.trials_dir.mkdir(parents=True, exist_ok=True)
@@ -387,11 +385,8 @@ class ParameterLearner:
 
     def run(self, n_trials: int = None, resume: bool = False):
         total = n_trials or self.cfg["execution"]["total_trials"]
-        study_db = self.cfg["storage"].get(
-            "study_db", "sqlite:///output/learner_results/study.db"
-        )
-
-        db_path = Path(study_db.replace("sqlite:///", ""))
+        db_path = self.results_dir / "study.db"
+        study_db = f"sqlite:///{db_path}"
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         if resume:
@@ -403,6 +398,7 @@ class ParameterLearner:
                 storage=study_db,
                 direction="maximize",
                 sampler=optuna.samplers.TPESampler(seed=42),
+                load_if_exists=True,
             )
             print(f"new study: {study_db}")
 
@@ -416,13 +412,28 @@ class ParameterLearner:
 
         signal.signal(signal.SIGINT, self._signal_handler)
 
+        restart_interval = self.cfg["execution"].get("restart_interval", 0)
+
         try:
             self._startup()
-            study.optimize(
-                lambda trial: self._objective(trial, study),
-                n_trials=total,
-                show_progress_bar=True,
-            )
+            self._load_kg()
+            for i in range(total):
+                if restart_interval > 0 and i > 0 and i % restart_interval == 0:
+                    completed_so_far = len(
+                        [t for t in study.trials if t.state.name == "COMPLETE"]
+                    )
+                    print(
+                        f"  [RESTART] {completed_so_far} trials completed, "
+                        f"restarting game client..."
+                    )
+                self._shutdown()
+                time.sleep(2)
+                self._startup()
+                study.optimize(
+                    lambda trial: self._objective(trial, study),
+                    n_trials=1,
+                    show_progress_bar=False,
+                )
         except KeyboardInterrupt:
             print("\ninterrupted, saving progress...")
         finally:
@@ -477,18 +488,28 @@ class ParameterLearner:
             raise RuntimeError("server startup timeout")
 
         if game.get("kg_file"):
-            try:
-                requests.post(
-                    f"http://127.0.0.1:{port}/game/load_kg",
-                    json={
-                        "kg_file": game["kg_file"],
-                        "data_dir": game.get("data_dir"),
-                    },
-                    timeout=30,
-                )
-                print(f"  KG loaded: {game['kg_file']}")
-            except requests.RequestException as e:
-                print(f"  [WARN] KG load failed: {e}")
+            self._load_kg()
+
+    def _load_kg(self):
+        game = self.cfg.get("game", {})
+        kg_file = game.get("kg_file")
+        if not kg_file:
+            return
+        port = self._port
+        if not port:
+            return
+        try:
+            requests.post(
+                f"http://127.0.0.1:{port}/game/load_kg",
+                params={
+                    "kg_file": kg_file,
+                    "data_dir": game.get("data_dir") or "",
+                },
+                timeout=30,
+            )
+            print(f"  KG loaded: {kg_file}")
+        except requests.RequestException as e:
+            print(f"  [WARN] KG load failed: {e}")
 
     def _shutdown(self):
         if self._port:
@@ -555,7 +576,7 @@ class ParameterLearner:
             print("  [ERROR] failed to set beam params after 3 attempts")
             _pause_game(port)
             trial.set_user_attr("status", "error")
-            return 0.0
+            raise optuna.exceptions.TrialPruned("failed to set beam params")
 
         _resume_game(port)
 
@@ -593,23 +614,14 @@ class ParameterLearner:
         n_eps = metrics["num_episodes"]
 
         self._all_metrics.append(metrics)
-        all_avg_scores = [m["avg_score"] for m in self._all_metrics]
-        score_min = min(all_avg_scores)
-        score_max = max(all_avg_scores)
-        score_range = score_max - score_min
-        normalized_score = (
-            (avg_score - score_min) / score_range if score_range > 0 else 0.5
-        )
 
-        w_win = obj_cfg.get("win_rate_weight", 0.8)
-        w_score = obj_cfg.get("avg_score_weight", 0.2)
-        alpha = obj_cfg.get("stability_alpha", 0.5)
-        cap = obj_cfg.get("stability_cap", 5.0)
+        alpha = obj_cfg.get("stability_alpha", 0.2)
+        cap = obj_cfg.get("stability_cap", 8.0)
 
         stability_norm = min(stability / cap, 1.0) if cap > 0 else 0.0
         penalty_factor = max(1 - alpha * stability_norm, 0.0)
 
-        objective = win_rate * w_win + normalized_score * w_score * penalty_factor
+        objective = win_rate * avg_score * penalty_factor
 
         trial.set_user_attr("status", "completed")
         trial.set_user_attr("batch", self._batch)
@@ -641,16 +653,15 @@ class ParameterLearner:
             run_record["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(str(run_path), "w", encoding="utf-8") as f:
                 json.dump(run_record, f, ensure_ascii=False, indent=2)
-            return 0.0
+            raise optuna.exceptions.TrialPruned("trial timeout")
 
         return objective
 
     def _rerun(self, source_trial_number: int, n_times: int):
         import sqlite3
 
-        study_db = self.cfg["storage"].get(
-            "study_db", "sqlite:///output/learner_results/study.db"
-        )
+        db_path = self.results_dir / "study.db"
+        study_db = f"sqlite:///{db_path}"
         study = optuna.load_study(study_name="beam_search", storage=study_db)
         print(f"loaded study, {len(study.trials)} trials")
 
@@ -781,22 +792,13 @@ class ParameterLearner:
         stability = metrics["stability"]
 
         self._all_metrics.append(metrics)
-        all_avg_scores = [m["avg_score"] for m in self._all_metrics]
-        score_min = min(all_avg_scores)
-        score_max = max(all_avg_scores)
-        score_range = score_max - score_min
-        normalized_score = (
-            (avg_score - score_min) / score_range if score_range > 0 else 0.5
-        )
 
-        w_win = obj_cfg.get("win_rate_weight", 0.8)
-        w_score = obj_cfg.get("avg_score_weight", 0.2)
-        alpha = obj_cfg.get("stability_alpha", 0.5)
-        cap = obj_cfg.get("stability_cap", 5.0)
+        alpha = obj_cfg.get("stability_alpha", 0.2)
+        cap = obj_cfg.get("stability_cap", 8.0)
 
         stability_norm = min(stability / cap, 1.0) if cap > 0 else 0.0
         penalty_factor = max(1 - alpha * stability_norm, 0.0)
-        objective = win_rate * w_win + normalized_score * w_score * penalty_factor
+        objective = win_rate * avg_score * penalty_factor
 
         run_record["status"] = "completed" if completed else "timeout"
         run_record["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -962,6 +964,18 @@ def main():
         default=None,
         help="comma-separated masked action codes, e.g. '4a,4k'",
     )
+    parser.add_argument(
+        "--restart_interval",
+        type=int,
+        default=None,
+        help="restart game client every N trials (0=never)",
+    )
+    parser.add_argument(
+        "--run_dir",
+        default=None,
+        help="training run directory (e.g. output/learner_results/training_runs/run_0002). "
+        "If set, uses an isolated study.db and trial directory.",
+    )
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
@@ -974,6 +988,8 @@ def main():
         cfg["game"]["kg_file"] = args.kg_file
     if args.data_dir is not None:
         cfg["game"]["data_dir"] = args.data_dir
+    if args.restart_interval is not None:
+        cfg["execution"]["restart_interval"] = args.restart_interval
 
     if args.masked_actions:
         cfg["_fixed_masked_actions"] = [
@@ -989,6 +1005,9 @@ def main():
     print(f"  episodes/trial: {cfg['execution']['episodes_per_trial']}")
     print(f"  KG file: {cfg['game'].get('kg_file', '(auto)')}")
     print(f"  data dir: {cfg['game'].get('data_dir', '(auto)')}")
+    print(f"  restart interval: {cfg['execution'].get('restart_interval', 0)} trials")
+    if args.run_dir:
+        print(f"  run dir: {args.run_dir}")
     print("=" * 60)
 
     results_dir = Path(cfg["storage"].get("results_dir", "output/learner_results"))
@@ -997,7 +1016,7 @@ def main():
     pid_file.write_text(str(os.getpid()))
 
     try:
-        learner = ParameterLearner(cfg)
+        learner = ParameterLearner(cfg, run_dir=args.run_dir)
         if args.rerun is not None:
             learner._rerun(args.rerun, n_times=1)
         else:
