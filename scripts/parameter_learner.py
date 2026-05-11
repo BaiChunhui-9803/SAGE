@@ -34,6 +34,23 @@ optuna.logging.set_verbosity(optuna.logging.INFO)
 
 _DEFAULT_CONFIG = ROOT_DIR / "configs" / "learner_config.yaml"
 
+_ETG_PARAM_KEYS = (
+    "action_strategy",
+    "mode",
+    "beam_width",
+    "lookahead_steps",
+    "score_mode",
+    "min_visits",
+    "max_state_revisits",
+    "min_cum_prob",
+    "discount_factor",
+    "enable_backup",
+    "backup_score_threshold",
+    "backup_distance_threshold",
+    "epsilon",
+    "masked_actions",
+)
+
 
 def _find_free_port(exclude=None):
     exclude = set(exclude or [])
@@ -362,6 +379,37 @@ def _sample_params(trial: optuna.Trial, space: dict, cfg: dict = None) -> dict:
     return params
 
 
+def _fixed_etg_params_from_cfg(cfg: dict) -> dict:
+    search_space = cfg.get("search_space", {})
+    best_params = cfg.get("game", {}).get("best_params", {}) or {}
+    params = {}
+    defaults = {
+        "action_strategy": "best_beam",
+        "mode": "multi_step",
+        "beam_width": 3,
+        "lookahead_steps": 5,
+        "score_mode": "quality",
+        "min_visits": 1,
+        "max_state_revisits": 2,
+        "min_cum_prob": 0.01,
+        "discount_factor": 0.9,
+        "enable_backup": False,
+        "backup_score_threshold": 0.3,
+        "backup_distance_threshold": 0.2,
+        "epsilon": 0.1,
+        "masked_actions": [],
+    }
+    for key, default in defaults.items():
+        if key in best_params:
+            params[key] = best_params[key]
+        elif key in search_space and isinstance(search_space[key], list) and search_space[key]:
+            values = search_space[key]
+            params[key] = values[0] if not all(isinstance(v, (int, float)) for v in values) else values[len(values) // 2]
+        else:
+            params[key] = default
+    return params
+
+
 class ParameterLearner:
     def __init__(self, cfg: dict, run_dir: str = None):
         self.cfg = cfg
@@ -382,6 +430,279 @@ class ParameterLearner:
         self._current_proc = None
         self._port = None
         self._source_trial = None
+        self._override_cfg = self.cfg.get("action_override", {})
+        self._cf_enabled = self._override_cfg.get("enabled", False)
+        self._finetune_interval = self._override_cfg.get("finetune_interval", 25)
+        self._override_model_path = self.results_dir / "action_override_model.pkl"
+        self._tuning_cfg = self.cfg.get("action_tuning", {})
+        self._action_tuning_enabled = self._tuning_cfg.get("enabled", False)
+        self._action_tuning_model_path = self.results_dir / "action_tuning_model.pkl"
+        self._incremental_cfg = self.cfg.get("incremental_layer", {})
+        self._phase_cfg = self.cfg.get("phased_optimization", {}) or {}
+        self._current_phase = "synergy"
+        self._phase_history = []
+        stages = self._phase_cfg.get("stages", []) or []
+        self._adaptive_phase = str(stages[0].get("name", "etg_only")) if stages else "synergy"
+        self._adaptive_phase_start = 0
+        self._best_etg_params = None
+        self._best_etg_value = -float("inf")
+        self._etg_param_pool = []
+
+    def _select_synergy_etg_params(self) -> dict:
+        if not self._phase_cfg.get("synergy_use_best_etg_params", True):
+            return {}
+        if not self._etg_param_pool:
+            return self._best_etg_params or _fixed_etg_params_from_cfg(self.cfg)
+        pool_size = int(self._phase_cfg.get("synergy_etg_pool_size", 3) or 1)
+        pool = self._etg_param_pool[: max(pool_size, 1)]
+        selection = str(self._phase_cfg.get("synergy_etg_selection", "weighted"))
+        if selection == "best":
+            item = pool[0]
+        elif selection == "weighted":
+            weights = self._phase_cfg.get("synergy_etg_weights", [0.6, 0.25, 0.15])
+            if not isinstance(weights, list) or not weights:
+                weights = [0.6, 0.25, 0.15]
+            numeric_weights = []
+            for idx in range(len(pool)):
+                try:
+                    numeric_weights.append(float(weights[idx]))
+                except Exception:
+                    numeric_weights.append(0.0)
+            if sum(numeric_weights) <= 0:
+                numeric_weights = [1.0 / len(pool)] * len(pool)
+            total_weight = sum(numeric_weights)
+            used = len([h for h in self._phase_history if h["phase"] == "synergy"])
+            slot = ((used * 37) % 100) / 100.0
+            cumulative = 0.0
+            item = pool[-1]
+            for candidate, weight in zip(pool, numeric_weights):
+                cumulative += weight / total_weight
+                if slot <= cumulative:
+                    item = candidate
+                    break
+        else:
+            used = len([h for h in self._phase_history if h["phase"] == "synergy"])
+            item = pool[used % len(pool)]
+        params = dict(item.get("params", {}) or {})
+        params["synergy_etg_source_trial"] = int(item.get("trial", -1))
+        params["synergy_etg_source_value"] = float(item.get("value", 0.0))
+        return params
+
+    def _stage_cfg(self, phase: str) -> dict:
+        for stage in self._phase_cfg.get("stages", []) or []:
+            if str(stage.get("name", "")) == phase:
+                return stage
+        return {}
+
+    def _next_phase(self, phase: str) -> str:
+        stages = [str(s.get("name", "")) for s in self._phase_cfg.get("stages", []) or [] if s.get("name")]
+        if not stages:
+            return "synergy"
+        if phase not in stages:
+            return stages[0]
+        return stages[(stages.index(phase) + 1) % len(stages)]
+
+    def _phase_for_index(self, index: int) -> str:
+        if not self._phase_cfg.get("enabled", False):
+            return "synergy"
+        if str(self._phase_cfg.get("mode", "cycle")) == "adaptive":
+            return self._adaptive_phase
+        stages = self._phase_cfg.get("stages", []) or []
+        if self._phase_cfg.get("cycle", True):
+            cycle_len = sum(int(stage.get("trials", 0) or 0) for stage in stages)
+            if cycle_len > 0:
+                index = index % cycle_len
+        cursor = 0
+        for stage in stages:
+            name = str(stage.get("name", "synergy"))
+            trials = int(stage.get("trials", 0) or 0)
+            if trials <= 0:
+                continue
+            if cursor <= index < cursor + trials:
+                return name
+            cursor += trials
+        return str(self._phase_cfg.get("default_phase", "synergy"))
+
+    def _apply_phase_to_params(self, params: dict, phase: str) -> dict:
+        phased = dict(params)
+        phased["tuning_ood_key_mode"] = str(
+            self._tuning_cfg.get("ood_key_mode", "aggregate")
+        )
+        phased["tuning_ood_distance_bucket"] = float(
+            self._tuning_cfg.get("ood_distance_bucket", 0.5)
+        )
+        if phase == "etg_only":
+            phased["enable_action_tuning"] = False
+            phased["tuning_force_explore"] = False
+            phased["tuning_explore_ood"] = False
+            phased["exclude_from_parameter_optimization"] = False
+            phased["tuning_explore_rate"] = 0.0
+            phased["tuning_explore_sources"] = []
+            phased["phase"] = phase
+        elif phase == "exploration_only":
+            phased.update(self._best_etg_params or _fixed_etg_params_from_cfg(self.cfg))
+            phased["enable_action_tuning"] = True
+            phased["tuning_force_explore"] = True
+            phased["tuning_explore_ood"] = True
+            phased["exclude_from_parameter_optimization"] = bool(
+                self._phase_cfg.get("exclude_exploration_from_optimization", True)
+            )
+            phased["tuning_explore_rate"] = max(
+                float(self._tuning_cfg.get("explore_rate", 0.05)),
+                float(self._phase_cfg.get("exploration_min_rate", 0.20)),
+            )
+            phased["tuning_explore_sources"] = [
+                "kg_plan",
+                "kg_follow",
+                "fallback",
+                "ft_plan",
+                "kg_relaxed",
+                "fuzzy_plan",
+                "ood",
+            ]
+            phased["phase"] = phase
+        else:
+            phased.update(self._select_synergy_etg_params())
+            phased["enable_action_tuning"] = bool(self._action_tuning_enabled)
+            phased["tuning_force_explore"] = False
+            phased["tuning_explore_ood"] = False
+            phased["tuning_etg_first"] = bool(
+                self._phase_cfg.get("synergy_etg_first", True)
+            )
+            phased["tuning_etg_protected_sources"] = list(
+                self._phase_cfg.get(
+                    "synergy_etg_protected_sources",
+                    ["kg_plan", "kg_follow"],
+                )
+                or []
+            )
+            phased["exclude_from_parameter_optimization"] = False
+            phased["tuning_explore_rate"] = float(
+                self._phase_cfg.get("synergy_explore_rate", 0.0)
+            )
+            phased["tuning_explore_sources"] = list(
+                self._phase_cfg.get("synergy_explore_sources", []) or []
+            )
+            phased["tuning_validation_sources"] = list(
+                self._phase_cfg.get(
+                    "synergy_validation_sources",
+                    ["ood", "fallback", "kg_relaxed"],
+                )
+                or []
+            )
+            phased["tuning_validation_min_confidence"] = float(
+                self._phase_cfg.get(
+                    "synergy_validation_min_confidence",
+                    self._tuning_cfg.get("validation_min_confidence", 0.35),
+                )
+            )
+            phased["tuning_validation_min_advantage"] = float(
+                self._phase_cfg.get(
+                    "synergy_validation_min_advantage",
+                    self._tuning_cfg.get("validation_min_advantage", 5.0),
+                )
+            )
+            phased["tuning_validation_min_visits"] = int(
+                self._phase_cfg.get(
+                    "synergy_validation_min_visits",
+                    self._tuning_cfg.get("validation_min_visits", 8),
+                )
+            )
+            phased["tuning_validation_profiles"] = dict(
+                self._phase_cfg.get(
+                    "synergy_validation_profiles",
+                    {
+                        "ood": {
+                            "min_confidence": 0.30,
+                            "min_advantage": 4.0,
+                            "min_visits": 8,
+                        },
+                        "fallback": {
+                            "min_confidence": 0.30,
+                            "min_advantage": 4.0,
+                            "min_visits": 8,
+                        },
+                        "kg_relaxed": {
+                            "min_confidence": 0.45,
+                            "min_advantage": 8.0,
+                            "min_visits": 12,
+                        },
+                        "diverge": {
+                            "min_confidence": 0.45,
+                            "min_advantage": 8.0,
+                            "min_visits": 12,
+                        },
+                        "fuzzy_plan": {
+                            "min_confidence": 0.45,
+                            "min_advantage": 8.0,
+                            "min_visits": 12,
+                        },
+                    },
+                )
+                or {}
+            )
+            phased["phase"] = phase
+        return phased
+
+    def _record_phase_result(self, phase: str, value: float, metrics: dict, trial_number: int) -> None:
+        self._phase_history.append(
+            {
+                "phase": phase,
+                "value": float(value),
+                "avg_score": float(metrics.get("avg_score", 0.0)),
+                "win_rate": float(metrics.get("win_rate", 0.0)),
+                "trial": int(trial_number),
+            }
+        )
+        if phase == "etg_only":
+            run_path = self.runs_dir / f"trial_{trial_number:04d}_run.json"
+            try:
+                data = json.loads(run_path.read_text(encoding="utf-8"))
+                params = data.get("params", {}) or {}
+                etg_params = {k: params[k] for k in _ETG_PARAM_KEYS if k in params}
+                pool_item = {
+                    "trial": int(trial_number),
+                    "value": float(value),
+                    "params": dict(etg_params),
+                }
+                self._etg_param_pool = [
+                    item for item in self._etg_param_pool if item.get("trial") != trial_number
+                ]
+                self._etg_param_pool.append(pool_item)
+                self._etg_param_pool.sort(key=lambda item: item.get("value", -float("inf")), reverse=True)
+                pool_size = int(self._phase_cfg.get("synergy_etg_pool_size", 3) or 1)
+                self._etg_param_pool = self._etg_param_pool[: max(pool_size, 1)]
+                if value > self._best_etg_value:
+                    self._best_etg_value = float(value)
+                    self._best_etg_params = dict(etg_params)
+                    print(
+                        f"  [PHASE] best ETG params updated from trial {trial_number}: {value:.4f}",
+                        flush=True,
+                    )
+            except Exception:
+                pass
+        if str(self._phase_cfg.get("mode", "cycle")) != "adaptive":
+            return
+        stage = self._stage_cfg(phase)
+        max_trials = int(stage.get("max_trials", stage.get("trials", 50)) or 50)
+        min_trials = int(stage.get("min_trials", max(1, min(max_trials, 10))) or 1)
+        phase_items = [h for h in self._phase_history if h["phase"] == phase and h["trial"] >= self._adaptive_phase_start]
+        count = len(phase_items)
+        if count < min_trials:
+            return
+        should_advance = count >= max_trials
+        if phase == "etg_only":
+            target = float(stage.get("target_objective", self._phase_cfg.get("etg_target_objective", 35.0)))
+            should_advance = should_advance or max(h["value"] for h in phase_items) >= target
+        elif phase == "exploration_only":
+            target = float(stage.get("target_avg_score", self._phase_cfg.get("exploration_target_avg_score", 10.0)))
+            recent = phase_items[-min(5, len(phase_items)):]
+            should_advance = should_advance or float(np.mean([h["avg_score"] for h in recent])) >= target
+        if should_advance:
+            next_phase = self._next_phase(phase)
+            print(f"  [PHASE] {phase} -> {next_phase} after {count} trials", flush=True)
+            self._adaptive_phase = next_phase
+            self._adaptive_phase_start = trial_number + 1
 
     def run(self, n_trials: int = None, resume: bool = False):
         total = n_trials or self.cfg["execution"]["total_trials"]
@@ -413,11 +734,30 @@ class ParameterLearner:
         signal.signal(signal.SIGINT, self._signal_handler)
 
         restart_interval = self.cfg["execution"].get("restart_interval", 0)
+        restart_on_phase_change = bool(
+            self.cfg["execution"].get("restart_on_phase_change", True)
+        )
+        last_phase = None
 
         try:
             self._startup()
-            self._load_kg()
             for i in range(total):
+                self._current_phase = self._phase_for_index(i)
+                if (
+                    restart_on_phase_change
+                    and last_phase is not None
+                    and self._current_phase != last_phase
+                ):
+                    completed_so_far = len(
+                        [t for t in study.trials if t.state.name == "COMPLETE"]
+                    )
+                    print(
+                        f"  [PHASE-RESTART] {last_phase} -> {self._current_phase}; "
+                        f"{completed_so_far} completed trials, restarting game client..."
+                    )
+                    self._shutdown()
+                    time.sleep(2)
+                    self._startup()
                 if restart_interval > 0 and i > 0 and i % restart_interval == 0:
                     completed_so_far = len(
                         [t for t in study.trials if t.state.name == "COMPLETE"]
@@ -426,14 +766,21 @@ class ParameterLearner:
                         f"  [RESTART] {completed_so_far} trials completed, "
                         f"restarting game client..."
                     )
-                self._shutdown()
-                time.sleep(2)
-                self._startup()
+                    self._shutdown()
+                    time.sleep(2)
+                    self._startup()
+                last_phase = self._current_phase
                 study.optimize(
                     lambda trial: self._objective(trial, study),
                     n_trials=1,
                     show_progress_bar=False,
                 )
+                if (
+                    self._cf_enabled
+                    and self._finetune_interval > 0
+                    and (i + 1) % self._finetune_interval == 0
+                ):
+                    self._run_finetune_phase(i + 1, study)
         except KeyboardInterrupt:
             print("\ninterrupted, saving progress...")
         finally:
@@ -443,6 +790,9 @@ class ParameterLearner:
         self._save_summary(study)
 
     def _startup(self):
+        self._action_tuning_enabled = self._tuning_cfg.get("enabled", False) or bool(
+            self._phase_cfg.get("enabled", False)
+        )
         port = _find_free_port(exclude={8000, 8501, 8502})
         self._port = port
 
@@ -467,6 +817,93 @@ class ParameterLearner:
             cmd.extend(["--data_dir", game["data_dir"]])
         if game.get("fallback_action"):
             cmd.extend(["--fallback_action", game["fallback_action"]])
+        bktree_cfg = self.cfg.get("bktree", {}) or {}
+        primary_threshold = float(bktree_cfg.get("primary_threshold", 1.0))
+        secondary_threshold = float(bktree_cfg.get("secondary_threshold", 0.5))
+        cmd.extend(["--primary_threshold", str(primary_threshold)])
+        cmd.extend(["--secondary_threshold", str(secondary_threshold)])
+        if self._action_tuning_enabled:
+            cmd.append("--enable_action_tuning")
+            cmd.extend(["--action_tuning_model_path", str(self._action_tuning_model_path)])
+            cmd.extend(
+                [
+                    "--tuning_explore_rate",
+                    str(self._tuning_cfg.get("explore_rate", 0.05)),
+                    "--tuning_min_confidence",
+                    str(self._tuning_cfg.get("min_confidence", 0.35)),
+                    "--tuning_min_advantage",
+                    str(self._tuning_cfg.get("min_advantage", 1.0)),
+                    "--tuning_ucb_c",
+                    str(self._tuning_cfg.get("ucb_c", 1.4)),
+                    "--tuning_target_visits",
+                    str(self._tuning_cfg.get("target_visits", 10)),
+                    "--tuning_min_visits",
+                    str(self._tuning_cfg.get("min_visits", 3)),
+                    "--tuning_credit_mode",
+                    str(self._tuning_cfg.get("credit_mode", "every_visit")),
+                    "--tuning_discount_factor",
+                    str(self._tuning_cfg.get("discount_factor", 0.95)),
+                    "--tuning_outcome_bonus",
+                    str(self._tuning_cfg.get("outcome_bonus", 50.0)),
+                    "--tuning_confidence_return_scale",
+                    str(self._tuning_cfg.get("confidence_return_scale", 50.0)),
+                    "--tuning_ood_key_mode",
+                    str(self._tuning_cfg.get("ood_key_mode", "aggregate")),
+                    "--tuning_ood_distance_bucket",
+                    str(self._tuning_cfg.get("ood_distance_bucket", 0.5)),
+                    "--max_nid_fallback_dist",
+                    str(self._tuning_cfg.get("max_nid_fallback_dist", 0.75)),
+                    "--max_nid_fallback_hp_dist",
+                    str(self._tuning_cfg.get("max_nid_fallback_hp_dist", 1.5)),
+                ]
+            )
+            guard_cfg = self._tuning_cfg.get("restart_guard", {}) or {}
+            if guard_cfg.get("enabled", True):
+                cmd.append("--restart_guard_enabled")
+                cmd.extend(
+                    [
+                        "--restart_warmup_episodes",
+                        str(guard_cfg.get("warmup_episodes", 10)),
+                        "--restart_guard_max_ood_ratio",
+                        str(guard_cfg.get("max_ood_ratio", 0.30)),
+                        "--restart_guard_max_ood_mc_ratio",
+                        str(guard_cfg.get("max_ood_mc_ratio", 0.30)),
+                        "--restart_guard_max_episode_frames",
+                        str(guard_cfg.get("max_episode_frames", 80)),
+                        "--restart_guard_high_score_ood_min_score",
+                        str(guard_cfg.get("high_score_ood_min_score", 24.0)),
+                    ]
+                )
+                if guard_cfg.get("allow_high_score_ood_update", True):
+                    cmd.append("--restart_guard_allow_high_score_ood_update")
+                if guard_cfg.get("skip_model_update", True):
+                    cmd.append("--restart_guard_skip_model_update")
+                if guard_cfg.get("skip_bad_results", True):
+                    cmd.append("--restart_guard_skip_bad_results")
+                if guard_cfg.get("disable_ood_explore_on_violation", True):
+                    cmd.append("--restart_guard_disable_ood_explore")
+        if self._incremental_cfg.get("enabled", False):
+            cmd.append("--enable_incremental_layer")
+            if self._incremental_cfg.get("update_bktree", False):
+                cmd.append("--incremental_update_bktree")
+            if self._incremental_cfg.get("update_etg_delta", False):
+                cmd.append("--incremental_update_etg_delta")
+            if self._incremental_cfg.get("use_delta_for_planning", False):
+                cmd.append("--incremental_use_delta_for_planning")
+            delta_dir = self._incremental_cfg.get(
+                "delta_dir", str(self.results_dir / "incremental_layer")
+            )
+            if not Path(delta_dir).is_absolute():
+                delta_dir = str(self.results_dir / delta_dir)
+            cmd.extend(["--incremental_delta_dir", delta_dir])
+            cmd.extend(
+                [
+                    "--incremental_persist_interval",
+                    str(self._incremental_cfg.get("persist_interval_episodes", 10)),
+                    "--incremental_min_new_state_distance",
+                    str(self._incremental_cfg.get("min_new_state_distance", 1.0)),
+                ]
+            )
 
         log_path = self.trials_dir / "learner.log"
         log_file = open(str(log_path), "a", encoding="utf-8")
@@ -486,9 +923,6 @@ class ParameterLearner:
         if not _wait_for_server(port, timeout=startup_wait):
             self._current_proc.terminate()
             raise RuntimeError("server startup timeout")
-
-        if game.get("kg_file"):
-            self._load_kg()
 
     def _load_kg(self):
         game = self.cfg.get("game", {})
@@ -510,6 +944,45 @@ class ParameterLearner:
             print(f"  KG loaded: {kg_file}")
         except requests.RequestException as e:
             print(f"  [WARN] KG load failed: {e}")
+
+    def _run_finetune_phase(self, completed_trials: int, study):
+        try:
+            from scripts.counterfactual_simulator import CounterfactualSimulator
+        except ImportError:
+            print("  [CF-FINETUNE] counterfactual_simulator not available, skipping")
+            return
+
+        recent_count = self._override_cfg.get("recent_trials_for_analysis", 20)
+        completed = [t.number for t in study.trials if t.state.name == "COMPLETE"]
+        recent_trials = completed[-recent_count:]
+        if not recent_trials:
+            return
+
+        try:
+            simulator = CounterfactualSimulator(
+                self.cfg, self.results_dir, self.results_dir
+            )
+            result = simulator.run_finetune_phase(completed_trials, recent_trials)
+            print(
+                f"  [CF-FINETUNE] Result: {json.dumps(result, indent=2, ensure_ascii=False)}"
+            )
+            if self._override_model_path.exists():
+                self._send_override_model_to_agent()
+        except Exception as e:
+            print(f"  [CF-FINETUNE] Error: {e}")
+
+    def _send_override_model_to_agent(self):
+        if not self._port:
+            return
+        try:
+            requests.post(
+                f"http://127.0.0.1:{self._port}/game/beam_params",
+                json={"override_model_path": str(self._override_model_path)},
+                timeout=10,
+            )
+            print(f"  Override model sent to agent: {self._override_model_path}")
+        except Exception as e:
+            print(f"  [WARN] Failed to send override model: {e}")
 
     def _shutdown(self):
         if self._port:
@@ -541,7 +1014,15 @@ class ParameterLearner:
     def _objective(self, trial: optuna.Trial, study: optuna.Study) -> float:
         space = self.cfg["search_space"]
         params = _sample_params(trial, space, self.cfg)
-        return self._execute_trial(trial, params)
+        params = self._apply_phase_to_params(params, self._current_phase)
+        value = self._execute_trial(trial, params)
+        if params.get("exclude_from_parameter_optimization", False):
+            trial.set_user_attr("probe_objective", value)
+            trial.set_user_attr("status", "exploration_probe")
+            raise optuna.exceptions.TrialPruned(
+                "exploration-only probe excluded from parameter optimization"
+            )
+        return value
 
     def _execute_trial(self, trial: optuna.Trial, params: dict) -> float:
         target_episodes = self.cfg["execution"]["episodes_per_trial"]
@@ -549,6 +1030,7 @@ class ParameterLearner:
 
         print(f"\n{'=' * 60}")
         print(f"Trial #{trial.number}")
+        print(f"  phase: {params.get('phase', self._current_phase)}")
         for k, v in params.items():
             print(f"  {k}: {v}")
         print(f"  target: {target_episodes} episodes")
@@ -561,6 +1043,13 @@ class ParameterLearner:
             ep_file.write_text("", encoding="utf-8")
 
         send_params = dict(params)
+        bktree_cfg = self.cfg.get("bktree", {}) or {}
+        send_params["bktree_primary_threshold"] = float(
+            bktree_cfg.get("primary_threshold", 1.0)
+        )
+        send_params["bktree_secondary_threshold"] = float(
+            bktree_cfg.get("secondary_threshold", 0.5)
+        )
         send_params["local_result_dir"] = str(trial_dir)
         send_params["target_episodes"] = target_episodes
         send_params["trial_number"] = trial.number
@@ -585,6 +1074,7 @@ class ParameterLearner:
             "port": port,
             "target_episodes": target_episodes,
             "params": {k: v for k, v in params.items()},
+            "phase": params.get("phase", self._current_phase),
             "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "running",
             "batch": self._batch,
@@ -622,8 +1112,19 @@ class ParameterLearner:
         penalty_factor = max(1 - alpha * stability_norm, 0.0)
 
         objective = win_rate * avg_score * penalty_factor
+        self._record_phase_result(
+            params.get("phase", self._current_phase), objective, metrics, trial.number
+        )
 
         trial.set_user_attr("status", "completed")
+        trial.set_user_attr("phase", params.get("phase", self._current_phase))
+        if "synergy_etg_source_trial" in params:
+            trial.set_user_attr(
+                "synergy_etg_source_trial", int(params["synergy_etg_source_trial"])
+            )
+            trial.set_user_attr(
+                "synergy_etg_source_value", float(params.get("synergy_etg_source_value", 0.0))
+            )
         trial.set_user_attr("batch", self._batch)
         if self._source_trial is not None:
             trial.set_user_attr("source_trial", self._source_trial)
@@ -634,6 +1135,10 @@ class ParameterLearner:
         trial.set_user_attr("penalty_factor", penalty_factor)
         trial.set_user_attr("num_episodes", n_eps)
         trial.set_user_attr("result_file", str(trial_dir))
+        trial.set_user_attr(
+            "exclude_from_parameter_optimization",
+            bool(params.get("exclude_from_parameter_optimization", False)),
+        )
 
         print(
             f"  win_rate: {win_rate:.2%}  avg_score: {avg_score:.1f}  stability: {stability:.4f}  penalty: {penalty_factor:.2f}"
@@ -741,6 +1246,13 @@ class ParameterLearner:
                     fp.unlink()
 
         send_params = dict(params)
+        bktree_cfg = self.cfg.get("bktree", {}) or {}
+        send_params["bktree_primary_threshold"] = float(
+            bktree_cfg.get("primary_threshold", 1.0)
+        )
+        send_params["bktree_secondary_threshold"] = float(
+            bktree_cfg.get("secondary_threshold", 0.5)
+        )
         send_params["local_result_dir"] = str(trial_dir)
         send_params["target_episodes"] = target_episodes
         send_params["trial_number"] = trial_number
@@ -971,10 +1483,30 @@ def main():
         help="restart game client every N trials (0=never)",
     )
     parser.add_argument(
+        "--restart_on_phase_change",
+        action="store_true",
+        help="restart game client whenever phased optimization switches phase",
+    )
+    parser.add_argument(
+        "--no_restart_on_phase_change",
+        action="store_true",
+        help="disable phase-change restart",
+    )
+    parser.add_argument(
         "--run_dir",
         default=None,
         help="training run directory (e.g. output/learner_results/training_runs/run_0002). "
         "If set, uses an isolated study.db and trial directory.",
+    )
+    parser.add_argument(
+        "--enable_counterfactual",
+        action="store_true",
+        help="Enable counterfactual action override during parameter search",
+    )
+    parser.add_argument(
+        "--enable_action_tuning",
+        action="store_true",
+        help="Enable Monte Carlo action tuning during parameter search",
     )
     args = parser.parse_args()
 
@@ -990,6 +1522,16 @@ def main():
         cfg["game"]["data_dir"] = args.data_dir
     if args.restart_interval is not None:
         cfg["execution"]["restart_interval"] = args.restart_interval
+    if args.restart_on_phase_change:
+        cfg.setdefault("execution", {})["restart_on_phase_change"] = True
+    if args.no_restart_on_phase_change:
+        cfg.setdefault("execution", {})["restart_on_phase_change"] = False
+    if args.enable_counterfactual:
+        cfg.setdefault("action_override", {})["enabled"] = True
+    if args.enable_action_tuning:
+        cfg.setdefault("action_tuning", {})["enabled"] = True
+    if cfg.get("phased_optimization", {}).get("enabled", False):
+        cfg.setdefault("action_tuning", {})["enabled"] = True
 
     if args.masked_actions:
         cfg["_fixed_masked_actions"] = [
@@ -1006,8 +1548,18 @@ def main():
     print(f"  KG file: {cfg['game'].get('kg_file', '(auto)')}")
     print(f"  data dir: {cfg['game'].get('data_dir', '(auto)')}")
     print(f"  restart interval: {cfg['execution'].get('restart_interval', 0)} trials")
+    print(
+        f"  restart on phase change: {cfg['execution'].get('restart_on_phase_change', True)}"
+    )
     if args.run_dir:
         print(f"  run dir: {args.run_dir}")
+    cf_enabled = cfg.get("action_override", {}).get("enabled", False)
+    print(f"  counterfactual: {'enabled' if cf_enabled else 'disabled'}")
+    if cf_enabled:
+        fi = cfg["action_override"].get("finetune_interval", 25)
+        print(f"  finetune_interval: {fi} trials")
+    tuning_enabled = cfg.get("action_tuning", {}).get("enabled", False)
+    print(f"  action_tuning: {'enabled' if tuning_enabled else 'disabled'}")
     print("=" * 60)
 
     results_dir = Path(cfg["storage"].get("results_dir", "output/learner_results"))

@@ -10,7 +10,11 @@ from typing import Dict, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src import ROOT_DIR
-from kg_web.constants import BRIDGE_API_URL, _ACTION_STRATEGY_LABELS
+from kg_web.constants import (
+    BRIDGE_API_URL,
+    _ACTION_STRATEGY_LABELS,
+    get_bktree_threshold_defaults,
+)
 from kg_web.loaders import load_episode_data
 from kg_web.live_game_html import _build_live_game_html
 
@@ -135,8 +139,9 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
     batch_start = 0
     batch_end = 0
     replay_count = 3
-    primary_threshold = 1.0
-    secondary_threshold = 0.5
+    threshold_defaults = get_bktree_threshold_defaults(map_id)
+    primary_threshold = float(threshold_defaults["primary_threshold"])
+    secondary_threshold = float(threshold_defaults["secondary_threshold"])
     if live_mode == "重采样数据集扩张（批量回放重演）" and has_replay:
         n_ep_batch = ep_data["n_episodes"]
         c1, c2, c3 = st.columns(3)
@@ -163,7 +168,7 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
                 "主聚类阈值 (primary)",
                 0.1,
                 5.0,
-                1.0,
+                float(threshold_defaults["primary_threshold"]),
                 0.1,
                 key="live_primary_thresh",
                 help="坐标分布距离阈值。越小聚类越细、cluster 数越多；越大聚类越粗",
@@ -173,10 +178,33 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
                 "子聚类阈值 (secondary)",
                 0.1,
                 3.0,
-                0.5,
+                float(threshold_defaults["secondary_threshold"]),
                 0.1,
                 key="live_secondary_thresh",
                 help="生命值差异阈值。越小对 HP 变化越敏感",
+            )
+
+    else:
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            primary_threshold = st.number_input(
+                "BKTree primary",
+                0.0,
+                5.0,
+                float(threshold_defaults["primary_threshold"]),
+                0.05,
+                key="live_primary_thresh",
+                help="实时规划阶段使用的 primary BKTree 最近邻接受阈值。",
+            )
+        with tc2:
+            secondary_threshold = st.number_input(
+                "BKTree secondary",
+                0.0,
+                5.0,
+                float(threshold_defaults["secondary_threshold"]),
+                0.05,
+                key="live_secondary_thresh",
+                help="实时规划阶段使用的 secondary BKTree 最近邻接受阈值。",
             )
 
     live_backup = False
@@ -339,6 +367,10 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
             cmd.extend(["--autopilot_mode", "multi_step"])
         else:
             cmd.extend(["--autopilot_mode", "single_step"])
+        if "--primary_threshold" not in cmd:
+            cmd.extend(["--primary_threshold", str(primary_threshold)])
+        if "--secondary_threshold" not in cmd:
+            cmd.extend(["--secondary_threshold", str(secondary_threshold)])
 
         if live_mode not in ("回放重演", "重采样数据集扩张（批量回放重演）"):
             cmd.extend(["--beam_width", str(st.session_state.get("live_bw", 3))])

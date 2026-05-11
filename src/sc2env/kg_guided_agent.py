@@ -10,6 +10,11 @@ KGGuidedAgent — 基于 Experience Transition Graph 引导的实时决策 Agent
 
 from __future__ import annotations
 
+import os
+import random
+import hashlib
+import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -40,6 +45,38 @@ ACTION_NAME_MAP: Dict[str, str] = {
 }
 
 FALLBACK_ACTIONS = list(SmartAgent.actions)
+
+
+def _safe_cluster_digit(value: Any, default: str = "4") -> str:
+    try:
+        idx = int(value)
+    except Exception:
+        return default
+    if 0 <= idx < 5:
+        return str(idx)
+    return default
+
+
+def _is_valid_action_code(action_code: Any) -> bool:
+    return (
+        isinstance(action_code, str)
+        and len(action_code) == 2
+        and action_code[0] in "01234"
+        and action_code[1] in "abcdefghijk"
+    )
+
+
+@dataclass
+class NidResolution:
+    nid: Optional[int]
+    state_key: Optional[Any]
+    status: str
+    reason: str = ""
+    is_fallback: bool = False
+    is_ood: bool = False
+    candidate_nid: Optional[int] = None
+    distance: Optional[float] = None
+    hp_distance: Optional[float] = None
 
 
 def _states_match(
@@ -74,6 +111,10 @@ class KGGuidedAgent(SmartAgent):
         action_strategy: str = "best_beam",
         data_dir: Optional[str] = None,
         kg_file: Optional[str] = None,
+        override_model_path: Optional[str] = None,
+        cf_config: Optional[Dict[str, Any]] = None,
+        bktree_primary_threshold: float = 1.0,
+        bktree_secondary_threshold: float = 0.5,
     ):
         super(KGGuidedAgent, self).__init__()
         self.bridge = bridge
@@ -92,6 +133,8 @@ class KGGuidedAgent(SmartAgent):
         self._nid_norm_states: Dict[int, dict] = {}
         self._nid_norm_states_loaded: bool = False
         self._nid_fallback_cache: Dict[Tuple[int, int], int] = {}
+        self._nid_resolution_cache: Dict[Tuple[int, int, str], NidResolution] = {}
+        self._ood_state_cache: Dict[Tuple[int, int, str], str] = {}
         self._ep_history: List[Dict[str, Any]] = []
         self._prev_end_game_flag: bool = False
         self.kg = kg
@@ -99,6 +142,13 @@ class KGGuidedAgent(SmartAgent):
         self._dist_matrix = dist_matrix
         self._mode = mode
         self._beam_params = beam_params or {}
+        self._bktree_primary_threshold = float(
+            self._beam_params.get("bktree_primary_threshold", bktree_primary_threshold)
+        )
+        self._bktree_secondary_threshold = float(
+            self._beam_params.get("bktree_secondary_threshold", bktree_secondary_threshold)
+        )
+        self._last_bktree_match: Dict[str, Any] = {}
         self._action_strategy = action_strategy
         self._replay_actions: List[str] = list(replay_actions) if replay_actions else []
         self._replay_idx: int = 0
@@ -127,6 +177,9 @@ class KGGuidedAgent(SmartAgent):
         self._log_counters: Dict[str, int] = {
             "nid_none": 0,
             "nid_fallback": 0,
+            "nid_rejected": 0,
+            "nid_ood": 0,
+            "ood": 0,
             "fallback": 0,
             "kg_plan": 0,
             "kg_follow": 0,
@@ -135,6 +188,20 @@ class KGGuidedAgent(SmartAgent):
             "kg_relaxed": 0,
             "fuzzy_plan": 0,
             "terminal_fix": 0,
+            "override": 0,
+            "tuning": 0,
+            "mc_explore": 0,
+            "ood_mc_explore": 0,
+            "ood_tuning": 0,
+            "tuning_opportunity": 0,
+            "tuning_accepted": 0,
+            "tuning_candidate_eligible": 0,
+            "tuning_validation_opportunity": 0,
+            "tuning_validation_accepted": 0,
+            "tuning_etg_first_blocked": 0,
+            "tuning_masked_blocked": 0,
+            "guard_skip_update": 0,
+            "guard_ood_disabled": 0,
             "total": 0,
         }
 
@@ -149,6 +216,36 @@ class KGGuidedAgent(SmartAgent):
         self._ep_action_log: List[Dict[str, Any]] = []
         self._kg_sam: Optional[Dict[int, Dict]] = None
         self._ep_completed_count: int = 0
+
+        self._override_model = None
+        self._override_model_path: Optional[str] = None
+        self._action_tuning_model = None
+        self._action_tuning_model_path: Optional[str] = None
+        self._tuning_episode_trace: List[Dict[str, Any]] = []
+        self._incremental_layer = None
+        self._restart_guard_warmup_remaining: int = self._restart_guard_warmup_from_params()
+        self._restart_guard_episode_index: int = 0
+        self._ood_explore_disabled: bool = False
+        self._ood_explore_disabled_reason: str = ""
+        self._cf_config: Optional[Dict[str, Any]] = cf_config
+        self._cf_step: int = 0
+        self._cf_override_disabled: bool = cf_config is not None
+        self._cf_runs_remaining: int = 0
+
+        if override_model_path and os.path.isfile(override_model_path):
+            try:
+                from src.decision.action_override_model import ActionOverrideModel
+
+                self._override_model = ActionOverrideModel.load(override_model_path)
+                self._override_model_path = override_model_path
+            except Exception as _e:
+                print(
+                    f"[KGGuidedAgent] failed to load override model: {_e}", flush=True
+                )
+
+        if cf_config is not None:
+            self._cf_step = 0
+            self._cf_runs_remaining = cf_config.get("cf_runs", 1)
 
         if initial_bktree_data is not None:
             self._load_bktree_from_data(initial_bktree_data)
@@ -252,6 +349,30 @@ class KGGuidedAgent(SmartAgent):
             else:
                 self._replay_idx = len(self._replay_actions)
 
+        if self._cf_config is not None and self._cf_step > 0:
+            if self._ep_history:
+                ep_id = self.ctx.episode_count if self.ctx else 0
+                self._ep_batch.append(
+                    {
+                        "episode_id": ep_id,
+                        "frames": list(self._ep_history),
+                        "result": self.end_game_state or "Dogfall",
+                        "score": 0,
+                    }
+                )
+                self._ep_history = []
+            self._flush_ep_batch()
+            self._cf_step = 0
+            self._cf_override_disabled = True
+            self._cf_runs_remaining -= 1
+            if self._cf_runs_remaining > 0:
+                self._mode = "counterfactual"
+            else:
+                try:
+                    self.bridge.send_control("pause")
+                except Exception:
+                    pass
+
         if hasattr(self, "ctx") and self.ctx:
             ep = self.ctx.episode_count
             self.bridge.update_status(
@@ -292,7 +413,7 @@ class KGGuidedAgent(SmartAgent):
 
     def _resolve_action(self, raw_action: str) -> Optional[str]:
         self._pending_cluster = None
-        if len(raw_action) == 2 and raw_action[0].isdigit() and raw_action[1].isalpha():
+        if _is_valid_action_code(raw_action):
             cluster_idx = int(raw_action[0])
             action_idx = ord(raw_action[1]) - ord("a")
             if 0 <= cluster_idx < len(self.clusters):
@@ -307,19 +428,57 @@ class KGGuidedAgent(SmartAgent):
             return mapped
         return None
 
+    def _fallback_action_code(self, p: int) -> str:
+        resolved = self._resolve_action(self._fallback_action)
+        cluster_idx = _safe_cluster_digit(p)
+        if resolved in self.actions:
+            return cluster_idx + chr(ord("a") + self.actions.index(resolved))
+        return cluster_idx + "c"
+
     def _query_readonly(self, norm_state):
         p_id, p_dist = self.primary_bktree.query_nearest(norm_state)
         if p_id is None:
             p_id, p_dist = 1, 0.0
+        primary_threshold = float(
+            self._beam_params.get(
+                "bktree_primary_threshold", self._bktree_primary_threshold
+            )
+        )
+        secondary_threshold = float(
+            self._beam_params.get(
+                "bktree_secondary_threshold", self._bktree_secondary_threshold
+            )
+        )
         sec_tree = self.secondary_bktree.get(p_id)
         if sec_tree is None or sec_tree.root is None:
+            self._last_bktree_match = {
+                "p": p_id,
+                "s": 1,
+                "primary_distance": float(p_dist),
+                "secondary_distance": None,
+                "primary_threshold": primary_threshold,
+                "secondary_threshold": secondary_threshold,
+                "rejected": float(p_dist) > primary_threshold,
+            }
             return (p_id, 1)
         s_id, s_dist = sec_tree.query_nearest(norm_state)
-        return (p_id, s_id if s_id is not None else 1)
+        s_id = s_id if s_id is not None else 1
+        self._last_bktree_match = {
+            "p": p_id,
+            "s": s_id,
+            "primary_distance": float(p_dist),
+            "secondary_distance": float(s_dist),
+            "primary_threshold": primary_threshold,
+            "secondary_threshold": secondary_threshold,
+            "rejected": float(p_dist) > primary_threshold
+            or float(s_dist) > secondary_threshold,
+        }
+        return (p_id, s_id)
 
     def get_state_cluster(self, norm_state):
         if self._bktree_loaded and self.primary_bktree.root is not None:
             return self._query_readonly(norm_state)
+        self._last_bktree_match = {}
         return super(KGGuidedAgent, self).get_state_cluster(norm_state)
 
     def _record_action(self, state_cluster: Any, action_name: str, source: str) -> None:
@@ -364,6 +523,398 @@ class KGGuidedAgent(SmartAgent):
             return self._cached_ft_model
         except Exception:
             return None
+
+    def _get_action_tuning_model(self):
+        model_path = self._beam_params.get("action_tuning_model_path")
+        if not model_path:
+            return None
+        from pathlib import Path as _Path
+
+        p = _Path(model_path)
+        if (
+            self._action_tuning_model is not None
+            and self._action_tuning_model_path == model_path
+        ):
+            if "tuning_confidence_return_scale" in self._beam_params:
+                self._action_tuning_model.confidence_return_scale = float(
+                    self._beam_params.get("tuning_confidence_return_scale", 50.0)
+                )
+                self._action_tuning_model.recalibrate_confidences()
+            return self._action_tuning_model
+        try:
+            from src.decision.action_tuning_model import ActionTuningModel
+
+            if p.exists():
+                self._action_tuning_model = ActionTuningModel.load(str(p))
+            else:
+                target_visits = int(self._beam_params.get("tuning_target_visits", 10))
+                exploration_c = float(self._beam_params.get("tuning_ucb_c", 1.4))
+                discount_factor = float(
+                    self._beam_params.get("tuning_discount_factor", 0.95)
+                )
+                outcome_bonus = float(self._beam_params.get("tuning_outcome_bonus", 50.0))
+                confidence_return_scale = float(
+                    self._beam_params.get("tuning_confidence_return_scale", 50.0)
+                )
+                self._action_tuning_model = ActionTuningModel(
+                    target_visits=target_visits,
+                    exploration_c=exploration_c,
+                    discount_factor=discount_factor,
+                    outcome_bonus=outcome_bonus,
+                    confidence_return_scale=confidence_return_scale,
+                )
+            if "tuning_confidence_return_scale" in self._beam_params:
+                self._action_tuning_model.confidence_return_scale = float(
+                    self._beam_params.get("tuning_confidence_return_scale", 50.0)
+                )
+                self._action_tuning_model.recalibrate_confidences()
+            self._action_tuning_model_path = model_path
+            return self._action_tuning_model
+        except Exception as e:
+            print(f"[ACTION-TUNING] failed to load/init model: {e}", flush=True)
+            return None
+
+    def _save_action_tuning_model(self) -> None:
+        model = self._get_action_tuning_model()
+        if model is None or not self._action_tuning_model_path:
+            return
+        try:
+            from src.decision.action_tuning_model import save_atomic
+
+            save_atomic(model, self._action_tuning_model_path)
+        except Exception as e:
+            print(f"[ACTION-TUNING] failed to save model: {e}", flush=True)
+
+    def _get_incremental_layer(self):
+        cfg = self._beam_params.get("incremental_layer")
+        if not cfg or not cfg.get("enabled", False):
+            return None
+        if self._incremental_layer is not None:
+            return self._incremental_layer
+        try:
+            from src.decision.incremental_layer import (
+                IncrementalLayerConfig,
+                IncrementalLayerStore,
+            )
+
+            self._incremental_layer = IncrementalLayerStore(
+                IncrementalLayerConfig.from_dict(cfg)
+            )
+            print(
+                f"[INCREMENTAL] layer initialized: {self._incremental_layer.summary()}",
+                flush=True,
+            )
+            return self._incremental_layer
+        except Exception as e:
+            print(f"[INCREMENTAL] failed to initialize: {e}", flush=True)
+            return None
+
+    def _route_with_action_tuning(
+        self,
+        state_id: Any,
+        etg_action: Optional[str],
+        event_type: str,
+    ) -> Tuple[Optional[str], str, Optional[Dict[str, Any]]]:
+        if not self._beam_params.get("enable_action_tuning", False):
+            return etg_action, event_type, None
+        model = self._get_action_tuning_model()
+        if model is None or state_id is None or etg_action is None:
+            return etg_action, event_type, None
+        explore_rate = float(self._beam_params.get("tuning_explore_rate", 0.05))
+        explore_sources = self._beam_params.get(
+            "tuning_explore_sources",
+            ["fallback", "ft_plan", "kg_relaxed", "fuzzy_plan", "ood"],
+        )
+        validation_sources = self._beam_params.get(
+            "tuning_validation_sources",
+            ["ood", "fallback", "kg_relaxed", "fuzzy_plan", "diverge"],
+        )
+        phase = str(self._beam_params.get("phase", ""))
+        etg_first = bool(
+            self._beam_params.get(
+                "tuning_etg_first",
+                phase == "synergy",
+            )
+        )
+        protected_sources = set(
+            self._beam_params.get(
+                "tuning_etg_protected_sources",
+                ["kg_plan", "kg_follow"],
+            )
+            or []
+        )
+        is_ood = str(event_type).startswith("ood")
+        if is_ood and self._ood_explore_disabled:
+            info = {
+                "source": "ood",
+                "reason": self._ood_explore_disabled_reason or "ood_explore_disabled",
+                "confidence": 0.0,
+                "advantage": 0.0,
+                "etg_action": etg_action,
+                "action": etg_action,
+            }
+            return etg_action, "ood", info
+        force_explore = bool(self._beam_params.get("tuning_force_explore", False))
+        explore_ood = bool(self._beam_params.get("tuning_explore_ood", True))
+        explore = (
+            force_explore
+            or (is_ood and explore_ood)
+            or event_type in explore_sources
+            or random.random() < explore_rate
+        )
+        protected_by_etg_first = (
+            etg_first
+            and not explore
+            and str(event_type) in protected_sources
+        )
+        validation = (
+            not explore
+            and not protected_by_etg_first
+            and (is_ood or event_type in validation_sources)
+        )
+        if protected_by_etg_first:
+            self._log_counters["tuning_etg_first_blocked"] = (
+                self._log_counters.get("tuning_etg_first_blocked", 0) + 1
+            )
+            return etg_action, event_type, {
+                "source": event_type,
+                "reason": "etg_first_protected_source",
+                "confidence": 0.0,
+                "advantage": 0.0,
+                "etg_action": etg_action,
+                "action": etg_action,
+                "opportunity": False,
+                "validation": False,
+            }
+        min_confidence = float(self._beam_params.get("tuning_min_confidence", 0.35))
+        min_advantage = float(self._beam_params.get("tuning_min_advantage", 1.0))
+        min_visits = int(self._beam_params.get("tuning_min_visits", 3))
+        if validation:
+            min_confidence = float(
+                self._beam_params.get("tuning_validation_min_confidence", min_confidence)
+            )
+            min_advantage = float(
+                self._beam_params.get("tuning_validation_min_advantage", min_advantage)
+            )
+            min_visits = int(
+                self._beam_params.get("tuning_validation_min_visits", min_visits)
+            )
+            profile = "ood" if is_ood else str(event_type)
+            profiles = self._beam_params.get("tuning_validation_profiles", {}) or {}
+            profile_cfg = profiles.get(profile, {}) if isinstance(profiles, dict) else {}
+            if profile_cfg:
+                min_confidence = float(
+                    profile_cfg.get("min_confidence", min_confidence)
+                )
+                min_advantage = float(profile_cfg.get("min_advantage", min_advantage))
+                min_visits = int(profile_cfg.get("min_visits", min_visits))
+            else:
+                prefix = f"tuning_validation_{profile}_"
+                min_confidence = float(
+                    self._beam_params.get(prefix + "min_confidence", min_confidence)
+                )
+                min_advantage = float(
+                    self._beam_params.get(prefix + "min_advantage", min_advantage)
+                )
+                min_visits = int(
+                    self._beam_params.get(prefix + "min_visits", min_visits)
+                )
+        masked_actions = [
+            action
+            for action in self._beam_params.get("masked_actions", []) or []
+            if _is_valid_action_code(action)
+        ]
+        decision = model.choose_action(
+            state_id,
+            etg_action,
+            ranked_actions=getattr(self, "_ranked_actions", []),
+            min_confidence=min_confidence,
+            min_advantage=min_advantage,
+            min_visits=min_visits,
+            explore=explore,
+            excluded_actions=masked_actions,
+        )
+        if decision.candidate_action in masked_actions:
+            self._log_counters["tuning_masked_blocked"] = (
+                self._log_counters.get("tuning_masked_blocked", 0) + 1
+            )
+            return etg_action, event_type, {
+                "source": event_type,
+                "reason": "masked_tuning_candidate",
+                "confidence": round(float(decision.confidence), 4),
+                "advantage": round(float(decision.advantage), 4),
+                "etg_action": etg_action,
+                "action": etg_action,
+                "candidate_action": decision.candidate_action,
+                "candidate_visits": int(decision.candidate_visits),
+                "opportunity": bool(explore or validation),
+                "validation": bool(validation),
+            }
+        opportunity = explore or validation
+        candidate_eligible = (
+            decision.candidate_action is not None
+            and decision.candidate_action != etg_action
+            and decision.candidate_visits >= min_visits
+            and decision.confidence >= min_confidence
+            and decision.advantage >= min_advantage
+        )
+        info = {
+            "source": decision.source,
+            "reason": decision.reason,
+            "confidence": round(float(decision.confidence), 4),
+            "advantage": round(float(decision.advantage), 4),
+            "etg_action": decision.etg_action,
+            "action": decision.action,
+            "candidate_action": decision.candidate_action,
+            "candidate_visits": int(decision.candidate_visits),
+            "candidate_eligible": bool(candidate_eligible),
+            "opportunity": bool(opportunity),
+            "validation": bool(validation),
+            "validation_profile": "ood" if is_ood else str(event_type),
+            "threshold_confidence": round(float(min_confidence), 4),
+            "threshold_advantage": round(float(min_advantage), 4),
+            "threshold_visits": int(min_visits),
+        }
+        if opportunity:
+            self._log_counters["tuning_opportunity"] = (
+                self._log_counters.get("tuning_opportunity", 0) + 1
+            )
+        if validation:
+            self._log_counters["tuning_validation_opportunity"] = (
+                self._log_counters.get("tuning_validation_opportunity", 0) + 1
+            )
+        if candidate_eligible:
+            self._log_counters["tuning_candidate_eligible"] = (
+                self._log_counters.get("tuning_candidate_eligible", 0) + 1
+            )
+        if decision.source in ("tuning", "mc_explore") and decision.action:
+            routed_source = decision.source
+            if is_ood:
+                routed_source = "ood_tuning" if decision.source == "tuning" else "ood_mc_explore"
+                info["source"] = routed_source
+                info["base_source"] = decision.source
+            if decision.source == "tuning":
+                self._log_counters["tuning_accepted"] = (
+                    self._log_counters.get("tuning_accepted", 0) + 1
+                )
+                if validation:
+                    self._log_counters["tuning_validation_accepted"] = (
+                        self._log_counters.get("tuning_validation_accepted", 0) + 1
+                    )
+            print(
+                f"[ACTION-TUNING] nid={state_id} {etg_action}->{decision.action} "
+                f"source={routed_source} conf={decision.confidence:.3f} "
+                f"adv={decision.advantage:.3f}",
+                flush=True,
+            )
+            return decision.action, routed_source, info
+        return etg_action, event_type, info
+
+    def _restart_guard_config(self) -> Dict[str, Any]:
+        return dict(self._beam_params.get("restart_guard", {}) or {})
+
+    def _restart_guard_warmup_from_params(self) -> int:
+        cfg = self._restart_guard_config()
+        value = cfg.get("warmup_episodes", self._beam_params.get("restart_warmup_episodes", 0))
+        try:
+            return max(int(value), 0)
+        except Exception:
+            return 0
+
+    def _reset_restart_guard_runtime(self) -> None:
+        self._restart_guard_warmup_remaining = self._restart_guard_warmup_from_params()
+        self._restart_guard_episode_index = 0
+        self._ood_explore_disabled = False
+        self._ood_explore_disabled_reason = ""
+        if self._restart_guard_enabled():
+            print(
+                f"[RESTART-GUARD] runtime reset warmup_episodes={self._restart_guard_warmup_remaining}",
+                flush=True,
+            )
+
+    def _restart_guard_enabled(self) -> bool:
+        cfg = self._restart_guard_config()
+        return bool(cfg.get("enabled", self._beam_params.get("restart_guard_enabled", True)))
+
+    def _episode_guard_decision(
+        self,
+        counters: Dict[str, int],
+        result: str,
+        frame_count: int,
+        final_score: float = 0.0,
+    ) -> Dict[str, Any]:
+        cfg = self._restart_guard_config()
+        if not self._restart_guard_enabled():
+            return {"skip_update": False, "disable_ood_explore": False, "reasons": []}
+        total = max(int(counters.get("total", 0)), 1)
+        ood_count = int(counters.get("nid_ood", 0))
+        ood_mc_count = int(counters.get("ood_mc_explore", 0))
+        dogfall = str(result).lower() in ("dogfall", "draw", "tie", "unknown", "")
+        loss = str(result).lower() == "loss"
+        ood_ratio = ood_count / total
+        ood_mc_ratio = ood_mc_count / total
+        reasons: List[str] = []
+
+        warmup_active = self._restart_guard_warmup_remaining > 0
+        if warmup_active:
+            reasons.append("warmup")
+
+        max_ood_ratio = float(cfg.get("max_ood_ratio", self._beam_params.get("restart_guard_max_ood_ratio", 0.30)))
+        max_ood_mc_ratio = float(
+            cfg.get("max_ood_mc_ratio", self._beam_params.get("restart_guard_max_ood_mc_ratio", 0.30))
+        )
+        max_frames = int(cfg.get("max_episode_frames", self._beam_params.get("restart_guard_max_episode_frames", 80)))
+        skip_bad_results = bool(cfg.get("skip_bad_results", True))
+
+        if ood_ratio > max_ood_ratio:
+            reasons.append(f"high_ood={ood_ratio:.3f}")
+        if ood_mc_ratio > max_ood_mc_ratio:
+            reasons.append(f"high_ood_mc={ood_mc_ratio:.3f}")
+        if max_frames > 0 and frame_count > max_frames:
+            reasons.append(f"long_episode={frame_count}")
+        if skip_bad_results and (dogfall or loss):
+            reasons.append(f"bad_result={result}")
+
+        allow_high_score_ood = bool(cfg.get("allow_high_score_ood_update", True))
+        high_score_threshold = float(cfg.get("high_score_ood_min_score", 24.0))
+        has_high_ood = any(
+            r.startswith("high_ood") or r.startswith("high_ood_mc") for r in reasons
+        )
+        has_non_ood_blocker = any(
+            not (r.startswith("high_ood") or r.startswith("high_ood_mc"))
+            for r in reasons
+        )
+        high_score_ood_allowed = (
+            allow_high_score_ood
+            and has_high_ood
+            and not has_non_ood_blocker
+            and str(result).lower() == "win"
+            and float(final_score) >= high_score_threshold
+        )
+        update_reasons = reasons
+        if high_score_ood_allowed:
+            update_reasons = [
+                r
+                for r in reasons
+                if not (r.startswith("high_ood") or r.startswith("high_ood_mc"))
+            ]
+
+        disable_on_violation = bool(cfg.get("disable_ood_explore_on_violation", True))
+        disable_ood_explore = disable_on_violation and any(
+            r.startswith("high_ood") or r.startswith("high_ood_mc") for r in reasons
+        ) and not high_score_ood_allowed
+        skip_update = bool(update_reasons) and bool(cfg.get("skip_model_update", True))
+        return {
+            "skip_update": skip_update,
+            "disable_ood_explore": disable_ood_explore,
+            "reasons": reasons,
+            "update_reasons": update_reasons,
+            "high_score_ood_allowed": high_score_ood_allowed,
+            "final_score": float(final_score),
+            "ood_ratio": ood_ratio,
+            "ood_mc_ratio": ood_mc_ratio,
+            "warmup_remaining": self._restart_guard_warmup_remaining,
+        }
 
     def _get_plan_from_beam(
         self, state_id: int, lookahead_steps: int
@@ -724,6 +1275,8 @@ class KGGuidedAgent(SmartAgent):
                         "score": ep.get("score", 0),
                         "frames": ep.get("frames", []),
                     }
+                    if "restart_guard" in ep:
+                        record["restart_guard"] = ep.get("restart_guard")
                     if trial_number is not None:
                         record["trial_number"] = trial_number
                     f.write(_json.dumps(record, ensure_ascii=False) + "\n")
@@ -774,19 +1327,41 @@ class KGGuidedAgent(SmartAgent):
                         + c.get("kg_relaxed", 0)
                         + c.get("fuzzy_plan", 0)
                         + c.get("fallback", 0)
+                        + c.get("mc_explore", 0)
+                        + c.get("ood_mc_explore", 0)
                     )
                     / total,
                     4,
                 )
+                progress["tuning_ratio"] = round(
+                    (c.get("tuning", 0) + c.get("ood_tuning", 0)) / total, 4
+                )
+                progress["ood_ratio"] = round(c.get("nid_ood", 0) / total, 4)
                 for k in (
                     "ft_plan",
                     "kg_relaxed",
                     "fuzzy_plan",
                     "kg_plan",
                     "kg_follow",
+                    "tuning",
+                    "mc_explore",
+                    "ood",
+                    "ood_tuning",
+                    "ood_mc_explore",
                     "fallback",
                     "terminal_fix",
                     "nid_fallback",
+                    "nid_rejected",
+                    "nid_ood",
+                    "guard_skip_update",
+                    "guard_ood_disabled",
+                    "tuning_opportunity",
+                    "tuning_accepted",
+                    "tuning_candidate_eligible",
+                    "tuning_validation_opportunity",
+                    "tuning_validation_accepted",
+                    "tuning_etg_first_blocked",
+                    "tuning_masked_blocked",
                 ):
                     if k in c:
                         progress[k] = c[k]
@@ -913,13 +1488,79 @@ class KGGuidedAgent(SmartAgent):
     def _resolve_nid(
         self, p: int, s: int, state_norm=None
     ) -> Tuple[Optional[int], bool]:
+        resolution = self._resolve_nid_strict(p, s, state_norm)
+        return resolution.nid, resolution.is_fallback
+
+    def _stable_state_digest(self, state_norm) -> str:
+        try:
+            payload = json.dumps(state_norm, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            payload = str(state_norm)
+        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    def _make_ood_state_key(
+        self,
+        p: int,
+        s: int,
+        state_norm=None,
+        distance: Optional[float] = None,
+        candidate_nid: Optional[int] = None,
+    ) -> str:
+        digest = self._stable_state_digest(state_norm) if state_norm is not None else "unknown"
+        mode = str(self._beam_params.get("tuning_ood_key_mode", "aggregate"))
+        cache_key = (p, s, digest, mode, candidate_nid)
+        cached = self._ood_state_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        dist_part = "na" if distance is None else f"{float(distance):.3f}"
+        if mode == "exact":
+            key = f"ood:{p}:{s}:{digest}:d{dist_part}"
+        else:
+            bucket_size = float(self._beam_params.get("tuning_ood_distance_bucket", 0.5))
+            if distance is None or bucket_size <= 0:
+                bucket = "na"
+            else:
+                bucket = f"{round(float(distance) / bucket_size) * bucket_size:.3f}"
+            base = "none" if candidate_nid is None else str(candidate_nid)
+            key = f"ood:{base}:{p}-{s}:agg:d{bucket}"
+        self._ood_state_cache[cache_key] = key
+        return key
+
+    def _resolve_nid_strict(self, p: int, s: int, state_norm=None) -> NidResolution:
+        match = getattr(self, "_last_bktree_match", {}) or {}
+        if (
+            match.get("rejected")
+            and int(match.get("p", p)) == int(p)
+            and int(match.get("s", s)) == int(s)
+        ):
+            candidate_nid = self._state_id_map.get((p, s))
+            primary_distance = match.get("primary_distance")
+            secondary_distance = match.get("secondary_distance")
+            distance = primary_distance
+            if secondary_distance is not None:
+                distance = max(float(primary_distance), float(secondary_distance))
+            state_key = self._make_ood_state_key(
+                p, s, state_norm, distance, candidate_nid=candidate_nid
+            )
+            return NidResolution(
+                nid=None,
+                state_key=state_key,
+                status="bktree_rejected",
+                reason="bktree_distance_over_threshold",
+                is_ood=True,
+                candidate_nid=candidate_nid,
+                distance=distance,
+                hp_distance=secondary_distance,
+            )
         nid = self._state_id_map.get((p, s))
         if nid is not None:
-            return nid, False
+            return NidResolution(nid=nid, state_key=nid, status="exact")
 
-        cached = self._nid_fallback_cache.get((p, s))
+        digest = self._stable_state_digest(state_norm) if state_norm is not None else "unknown"
+        cache_key = (p, s, digest)
+        cached = self._nid_resolution_cache.get(cache_key)
         if cached is not None:
-            return cached, True
+            return cached
 
         if state_norm is not None and self._nid_norm_states:
             from src.structure.custom_distance_sc2 import DistributionDistance
@@ -940,15 +1581,59 @@ class KGGuidedAgent(SmartAgent):
                 except Exception:
                     pass
             if best_nid is not None:
-                self._nid_fallback_cache[(p, s)] = best_nid
+                max_dist = float(self._beam_params.get("max_nid_fallback_dist", 0.75))
+                max_hp = float(self._beam_params.get("max_nid_fallback_hp_dist", 1.5))
+                if best_dist <= max_dist and best_hp <= max_hp:
+                    resolution = NidResolution(
+                        nid=best_nid,
+                        state_key=best_nid,
+                        status="near_valid",
+                        reason="nearest_within_threshold",
+                        is_fallback=True,
+                        candidate_nid=best_nid,
+                        distance=best_dist,
+                        hp_distance=best_hp,
+                    )
+                    self._nid_resolution_cache[cache_key] = resolution
+                    self._nid_fallback_cache[(p, s)] = best_nid
+                    print(
+                        f"[NID-FALLBACK] (p,s)=({p},{s}) -> nid={best_nid} "
+                        f"dist={best_dist:.3f} hp={best_hp:.3f}",
+                        flush=True,
+                    )
+                    return resolution
+                state_key = self._make_ood_state_key(
+                    p, s, state_norm, best_dist, candidate_nid=best_nid
+                )
+                resolution = NidResolution(
+                    nid=None,
+                    state_key=state_key,
+                    status="near_rejected",
+                    reason="nearest_over_threshold",
+                    is_ood=True,
+                    candidate_nid=best_nid,
+                    distance=best_dist,
+                    hp_distance=best_hp,
+                )
+                self._nid_resolution_cache[cache_key] = resolution
                 print(
-                    f"[NID-FALLBACK] (p,s)=({p},{s}) -> nid={best_nid} "
-                    f"dist={best_dist:.3f}",
+                    f"[NID-REJECT] (p,s)=({p},{s}) candidate={best_nid} "
+                    f"dist={best_dist:.3f} hp={best_hp:.3f} -> {state_key}",
                     flush=True,
                 )
-                return best_nid, True
+                return resolution
 
-        return None, False
+        state_key = self._make_ood_state_key(p, s, state_norm, None, candidate_nid=None)
+        resolution = NidResolution(
+            nid=None,
+            state_key=state_key,
+            status="missing",
+            reason="no_state_id_mapping",
+            is_ood=True,
+        )
+        self._nid_resolution_cache[cache_key] = resolution
+        print(f"[NID-MISSING] (p,s)=({p},{s}) -> {state_key}", flush=True)
+        return resolution
 
     def _etg_recalibrate(self) -> None:
         model = self._get_finetune_model()
@@ -1002,6 +1687,17 @@ class KGGuidedAgent(SmartAgent):
                     self._local_completed = 0
                     self._flush_trial_number = new_params.get("trial_number")
                 self._beam_params.update(new_params)
+                if "enable_action_tuning" in new_params:
+                    self._beam_params["enable_action_tuning"] = bool(new_params.get("enable_action_tuning"))
+                if any(
+                    k in new_params
+                    for k in (
+                        "restart_guard",
+                        "restart_guard_enabled",
+                        "restart_warmup_episodes",
+                    )
+                ):
+                    self._reset_restart_guard_runtime()
                 if "trial_number" in new_params:
                     self.bridge.confirm_params(new_params["trial_number"])
                 if "exploration_targets" in new_params:
@@ -1010,6 +1706,35 @@ class KGGuidedAgent(SmartAgent):
                     }
                     self._exploration_active = bool(self._exploration_targets)
                     self._exploration_trace = []
+                if "override_model_path" in new_params:
+                    _omp = new_params["override_model_path"]
+                    if _omp:
+                        try:
+                            from src.decision.action_override_model import (
+                                ActionOverrideModel,
+                            )
+
+                            self._override_model = ActionOverrideModel.load(_omp)
+                            self._override_model_path = _omp
+                            print(f"[OVERRIDE] model loaded from {_omp}", flush=True)
+                        except Exception as _oe:
+                            print(f"[OVERRIDE] failed to load: {_oe}", flush=True)
+                    else:
+                        self._override_model = None
+                        self._override_model_path = None
+                if "action_tuning_model_path" in new_params:
+                    _tmp = new_params.get("action_tuning_model_path")
+                    self._beam_params["action_tuning_model_path"] = _tmp
+                    self._action_tuning_model = None
+                    self._action_tuning_model_path = None
+                    if _tmp:
+                        self._get_action_tuning_model()
+                if "incremental_layer" in new_params:
+                    self._beam_params["incremental_layer"] = new_params.get(
+                        "incremental_layer"
+                    )
+                    self._incremental_layer = None
+                    self._get_incremental_layer()
         except Exception:
             pass
 
@@ -1127,10 +1852,13 @@ class KGGuidedAgent(SmartAgent):
         self._push_status(obs, str(state_cluster), my_units, enemy_units)
 
         p, s = int(state_cluster[0]), int(state_cluster[1])
-        nid, nid_fb = self._resolve_nid(p, s, state_norm)
-        if nid is None and not self._nid_norm_states_loaded:
+        nid_resolution = self._resolve_nid_strict(p, s, state_norm)
+        if nid_resolution.nid is None and not self._nid_norm_states_loaded:
             self._load_nid_norm_states()
-            nid, nid_fb = self._resolve_nid(p, s, state_norm)
+            nid_resolution = self._resolve_nid_strict(p, s, state_norm)
+        nid = nid_resolution.nid
+        state_key = nid_resolution.state_key
+        nid_fb = nid_resolution.is_fallback
         action_code = "4c"
         action_to_execute = None
         action_source = "fallback"
@@ -1141,6 +1869,35 @@ class KGGuidedAgent(SmartAgent):
         hp_delta = 0
         if self._prev_hp_my is not None:
             hp_delta = (hp_my - self._prev_hp_my) - (hp_enemy - self._prev_hp_enemy)
+
+        if self._mode == "counterfactual" and self._cf_config is not None:
+            diverge_step = self._cf_config.get("diverge_step", 0)
+            original_actions = self._cf_config.get("original_actions", [])
+            replacement_action = self._cf_config.get("replacement_action", "")
+
+            if self._cf_step < diverge_step and self._cf_step < len(original_actions):
+                action_code = original_actions[self._cf_step]
+                self._cf_step += 1
+                action_source = "cf_replay"
+                resolved = self._resolve_action(action_code)
+                if resolved is not None:
+                    action_to_execute = resolved
+                else:
+                    action_to_execute = self._resolve_action(self._fallback_action)
+                    action_source = "cf_replay_fallback"
+            elif self._cf_step == diverge_step and replacement_action:
+                action_code = replacement_action
+                self._cf_step += 1
+                action_source = "cf_inject"
+                resolved = self._resolve_action(action_code)
+                if resolved is not None:
+                    action_to_execute = resolved
+                else:
+                    action_to_execute = self._resolve_action(self._fallback_action)
+                    action_source = "cf_inject_fallback"
+            else:
+                self._cf_override_disabled = True
+                self._mode = "multi_step"
 
         if self._mode == "replay":
             replay_action = self._get_next_replay_action()
@@ -1184,15 +1941,77 @@ class KGGuidedAgent(SmartAgent):
                     self._log_counters.get("terminal_fix", 0) + 1
                 )
                 action_code_raw = "4b"
+            if (
+                not self._cf_override_disabled
+                and self._override_model is not None
+                and action_code_raw is not None
+            ):
+                override = self._override_model.suggest_override(
+                    nid,
+                    action_code_raw,
+                    min_confidence=self._beam_params.get(
+                        "override_min_confidence", 0.5
+                    ),
+                )
+                if override is not None:
+                    self._log_counters["override"] = (
+                        self._log_counters.get("override", 0) + 1
+                    )
+                    action_code_raw = override
+                    evt_type = "override"
+            tuning_info = None
+            if action_code_raw is not None:
+                action_code_raw, evt_type, tuning_info = self._route_with_action_tuning(
+                    nid, action_code_raw, evt_type
+                )
+            if action_code_raw is not None and not _is_valid_action_code(action_code_raw):
+                action_code_raw = self._fallback_action_code(p)
+                evt_type = "fallback"
             if action_code_raw is not None:
                 resolved = self._resolve_action(action_code_raw)
                 if resolved is not None:
                     action_to_execute = resolved
                     action_source = evt_type
                     action_code = action_code_raw
+                    if tuning_info is not None and plan_snap is not None:
+                        plan_snap = dict(plan_snap)
+                        plan_snap["action_tuning"] = tuning_info
                 else:
                     action_to_execute = self._resolve_action(self._fallback_action)
                     action_source = "fallback"
+            else:
+                action_to_execute = self._resolve_action(self._fallback_action)
+                action_source = "fallback"
+
+        elif self._mode != "replay" and nid_resolution.is_ood and state_key is not None:
+            action_code_raw = self._fallback_action_code(p)
+            evt_type = "ood"
+            tuning_info = None
+            if action_code_raw is not None:
+                action_code_raw, evt_type, tuning_info = self._route_with_action_tuning(
+                    state_key, action_code_raw, evt_type
+                )
+            if action_code_raw is not None and not _is_valid_action_code(action_code_raw):
+                action_code_raw = self._fallback_action_code(p)
+                evt_type = "ood"
+            resolved = self._resolve_action(action_code_raw) if action_code_raw else None
+            if resolved is not None:
+                action_to_execute = resolved
+                action_source = evt_type
+                action_code = action_code_raw
+                plan_snap = {
+                    "state_id": state_key,
+                    "mode": "ood_action_tuning",
+                    "trigger": nid_resolution.status,
+                    "action_tuning": tuning_info,
+                    "nid_resolution": {
+                        "status": nid_resolution.status,
+                        "reason": nid_resolution.reason,
+                        "candidate_nid": nid_resolution.candidate_nid,
+                        "distance": nid_resolution.distance,
+                        "hp_distance": nid_resolution.hp_distance,
+                    },
+                }
             else:
                 action_to_execute = self._resolve_action(self._fallback_action)
                 action_source = "fallback"
@@ -1212,7 +2031,7 @@ class KGGuidedAgent(SmartAgent):
 
         if action_source == "fallback" and action_to_execute in self.actions:
             a_idx = self.actions.index(action_to_execute)
-            _ci = str(self._prev_state_cluster[0]) if self._prev_state_cluster else "4"
+            _ci = _safe_cluster_digit(self._prev_state_cluster[0] if self._prev_state_cluster else None)
             action_code = _ci + chr(ord("a") + a_idx)
 
         self._last_action_executed = action_to_execute
@@ -1225,6 +2044,10 @@ class KGGuidedAgent(SmartAgent):
                 c["nid_none"] += 1
             if nid_fb:
                 c["nid_fallback"] = c.get("nid_fallback", 0) + 1
+            if nid_resolution.status == "near_rejected":
+                c["nid_rejected"] = c.get("nid_rejected", 0) + 1
+            if nid_resolution.is_ood:
+                c["nid_ood"] = c.get("nid_ood", 0) + 1
             key = action_source if action_source in c else "fallback"
             c[key] = c.get(key, 0) + 1
             if c["total"] % self._log_interval == 0:
@@ -1234,14 +2057,23 @@ class KGGuidedAgent(SmartAgent):
                     + c.get("kg_relaxed", 0)
                     + c.get("fuzzy_plan", 0)
                     + c.get("fallback", 0)
+                    + c.get("mc_explore", 0)
+                    + c.get("ood_mc_explore", 0)
                 )
+                tuning_count = c.get("tuning", 0) + c.get("ood_tuning", 0)
                 print(
-                    f"[SUMMARY] frames={c['total']} | nid_none={c['nid_none']} nid_fb={c.get('nid_fallback', 0)} | "
+                    f"[SUMMARY] frames={c['total']} | nid_none={c['nid_none']} "
+                    f"nid_fb={c.get('nid_fallback', 0)} nid_rej={c.get('nid_rejected', 0)} "
+                    f"nid_ood={c.get('nid_ood', 0)} | "
                     f"exploit={exploit} "
                     f"(kg_plan={c.get('kg_plan', 0)} kg_follow={c.get('kg_follow', 0)}) | "
-                    f"explore={explore} "
+                    f"explore={explore} tuning={tuning_count} "
                     f"(ft_plan={c.get('ft_plan', 0)} kg_relaxed={c.get('kg_relaxed', 0)} "
-                    f"fuzzy_plan={c.get('fuzzy_plan', 0)} fallback={c.get('fallback', 0)})",
+                    f"fuzzy_plan={c.get('fuzzy_plan', 0)} fallback={c.get('fallback', 0)} "
+                    f"mc={c.get('mc_explore', 0)} ood_mc={c.get('ood_mc_explore', 0)} "
+                    f"ood_tuning={c.get('ood_tuning', 0)} "
+                    f"tuning_opp={c.get('tuning_opportunity', 0)} "
+                    f"tuning_accept={c.get('tuning_accepted', 0)})",
                     flush=True,
                 )
 
@@ -1258,7 +2090,23 @@ class KGGuidedAgent(SmartAgent):
                     "action_code": action_code,
                     "action_source": action_source,
                     "is_exploration": action_source
-                    in ("ft_plan", "kg_relaxed", "fuzzy_plan", "fallback"),
+                    in (
+                        "ft_plan",
+                        "kg_relaxed",
+                        "fuzzy_plan",
+                        "fallback",
+                        "mc_explore",
+                        "tuning",
+                        "ood_mc_explore",
+                        "ood_tuning",
+                    ),
+                    "state_key": state_key,
+                    "nid_status": nid_resolution.status,
+                    "nid_reason": nid_resolution.reason,
+                    "nid_candidate": nid_resolution.candidate_nid,
+                    "nid_distance": nid_resolution.distance,
+                    "nid_hp_distance": nid_resolution.hp_distance,
+                    "nid_is_ood": nid_resolution.is_ood,
                     "my_count": len(my_units),
                     "enemy_count": len(enemy_units),
                     "hp_my": hp_my,
@@ -1279,19 +2127,30 @@ class KGGuidedAgent(SmartAgent):
             )
             self._replay_frame_count += 1
 
-            if self._mode != "replay" and nid is not None:
-                self._ep_action_log.append({"nid": nid, "action_code": action_code})
+            if self._mode != "replay" and state_key is not None:
+                if nid is not None:
+                    self._ep_action_log.append({"nid": nid, "action_code": action_code})
+                if self._beam_params.get("enable_action_tuning", False):
+                    self._tuning_episode_trace.append(
+                        {
+                            "nid": state_key,
+                            "action_code": action_code,
+                            "reward": 0.0,
+                            "source": action_source,
+                            "nid_status": nid_resolution.status,
+                        }
+                    )
 
             if (
                 self._prev_hp_my is not None
                 and self._mode != "replay"
-                and nid is not None
+                and state_key is not None
             ):
                 hp_delta = (hp_my - self._prev_hp_my) - (hp_enemy - self._prev_hp_enemy)
                 reward_mode = self._beam_params.get("reward_mode", "hp_episodic")
                 step_reward = hp_delta
 
-                if reward_mode == "etg_correct" and self._kg_sam is not None:
+                if reward_mode == "etg_correct" and self._kg_sam is not None and nid is not None:
                     sam = self._kg_sam
                     if nid in sam and action_code in sam[nid]:
                         try:
@@ -1305,8 +2164,10 @@ class KGGuidedAgent(SmartAgent):
                             pass
 
                 ft_model = self._get_finetune_model()
-                if ft_model is not None:
+                if ft_model is not None and nid is not None:
                     ft_model.update(nid, action_code, float(step_reward))
+                if self._tuning_episode_trace:
+                    self._tuning_episode_trace[-1]["reward"] = float(step_reward)
 
         self._prev_hp_my = hp_my
         self._prev_hp_enemy = hp_enemy
@@ -1316,6 +2177,14 @@ class KGGuidedAgent(SmartAgent):
             if self._ep_history:
                 _ep_counters = dict(self._log_counters)
                 c = self._log_counters
+                result_label = self.end_game_state or "Dogfall"
+                final_score = float(hp_my - hp_enemy)
+                guard = self._episode_guard_decision(
+                    _ep_counters,
+                    result_label,
+                    len(self._ep_history),
+                    final_score=final_score,
+                )
                 if self._mode != "replay":
                     exploit_count = c.get("kg_plan", 0) + c.get("kg_follow", 0)
                     explore_count = (
@@ -1323,20 +2192,66 @@ class KGGuidedAgent(SmartAgent):
                         + c.get("kg_relaxed", 0)
                         + c.get("fuzzy_plan", 0)
                         + c.get("fallback", 0)
+                        + c.get("mc_explore", 0)
+                        + c.get("ood_mc_explore", 0)
                     )
+                    tuning_count = c.get("tuning", 0) + c.get("ood_tuning", 0)
                     print(
                         f"[EP-END] ep={self.ctx.episode_count if self.ctx else '?'} "
                         f"result={self.end_game_state} frames={c['total']} | "
                         f"exploit={exploit_count} "
                         f"(kg_plan={c.get('kg_plan', 0)} kg_follow={c.get('kg_follow', 0)}) | "
-                        f"explore={explore_count} "
+                        f"explore={explore_count} tuning={tuning_count} "
                         f"(ft_plan={c.get('ft_plan', 0)} kg_relaxed={c.get('kg_relaxed', 0)} "
-                        f"fuzzy_plan={c.get('fuzzy_plan', 0)} fallback={c.get('fallback', 0)}) | "
-                        f"terminal_fix={c.get('terminal_fix', 0)} nid_none={c['nid_none']} nid_fb={c.get('nid_fallback', 0)}",
+                        f"fuzzy_plan={c.get('fuzzy_plan', 0)} fallback={c.get('fallback', 0)} "
+                        f"mc={c.get('mc_explore', 0)} ood_mc={c.get('ood_mc_explore', 0)} "
+                        f"ood_tuning={c.get('ood_tuning', 0)} "
+                        f"tuning_opp={c.get('tuning_opportunity', 0)} "
+                        f"tuning_accept={c.get('tuning_accepted', 0)}) | "
+                        f"terminal_fix={c.get('terminal_fix', 0)} nid_none={c['nid_none']} "
+                        f"nid_fb={c.get('nid_fallback', 0)} nid_rej={c.get('nid_rejected', 0)} "
+                        f"nid_ood={c.get('nid_ood', 0)}",
                         flush=True,
                     )
+                    if guard.get("skip_update") or guard.get("disable_ood_explore"):
+                        print(
+                            f"[RESTART-GUARD] ep={self.ctx.episode_count if self.ctx else '?'} "
+                            f"skip_update={guard.get('skip_update')} "
+                            f"disable_ood_explore={guard.get('disable_ood_explore')} "
+                            f"ood={guard.get('ood_ratio', 0):.3f} "
+                            f"ood_mc={guard.get('ood_mc_ratio', 0):.3f} "
+                            f"score={guard.get('final_score', 0):.1f} "
+                            f"high_score_ood_allowed={guard.get('high_score_ood_allowed', False)} "
+                            f"warmup_left={guard.get('warmup_remaining', 0)} "
+                            f"reasons={','.join(guard.get('reasons', []))}",
+                            flush=True,
+                        )
+                    if guard.get("disable_ood_explore"):
+                        self._ood_explore_disabled = True
+                        self._ood_explore_disabled_reason = ",".join(
+                            guard.get("reasons", [])
+                        ) or "restart_guard_violation"
+                        c["guard_ood_disabled"] = c.get("guard_ood_disabled", 0) + 1
+                    if guard.get("skip_update"):
+                        c["guard_skip_update"] = c.get("guard_skip_update", 0) + 1
 
-                    if self._ep_action_log:
+                    _ep_counters["guard_skip_update"] = c.get("guard_skip_update", 0)
+                    _ep_counters["guard_ood_disabled"] = c.get("guard_ood_disabled", 0)
+                    _ep_counters["tuning_opportunity"] = c.get("tuning_opportunity", 0)
+                    _ep_counters["tuning_accepted"] = c.get("tuning_accepted", 0)
+                    _ep_counters["tuning_candidate_eligible"] = c.get(
+                        "tuning_candidate_eligible", 0
+                    )
+                    _ep_counters["tuning_validation_opportunity"] = c.get(
+                        "tuning_validation_opportunity", 0
+                    )
+                    _ep_counters["tuning_validation_accepted"] = c.get(
+                        "tuning_validation_accepted", 0
+                    )
+
+                    allow_model_update = not bool(guard.get("skip_update"))
+
+                    if allow_model_update and self._ep_action_log:
                         ft_model = self._get_finetune_model()
                         reward_mode = self._beam_params.get(
                             "reward_mode", "hp_episodic"
@@ -1356,12 +2271,36 @@ class KGGuidedAgent(SmartAgent):
                                         entry["nid"], entry["action_code"], bonus
                                     )
 
+                    tuning_model = self._get_action_tuning_model()
+                    if allow_model_update and tuning_model is not None and self._tuning_episode_trace:
+                        tuning_model.update_episode(
+                            list(self._tuning_episode_trace),
+                            result_label,
+                            final_score=float(hp_my - hp_enemy),
+                            credit_mode=self._beam_params.get(
+                                "tuning_credit_mode", "every_visit"
+                            ),
+                        )
+                        self._save_action_tuning_model()
+                        self._tuning_episode_trace = []
+                    elif self._tuning_episode_trace and not allow_model_update:
+                        self._tuning_episode_trace = []
+
                     if self._beam_params.get("reward_mode") == "etg_offline":
                         self._ep_completed_count += 1
                         interval = self._beam_params.get("etg_recalibrate_interval", 20)
                         if self._ep_completed_count % interval == 0:
                             self._load_kg_sam()
                             self._etg_recalibrate()
+
+                    inc_layer = self._get_incremental_layer()
+                    if allow_model_update and inc_layer is not None:
+                        inc_layer.record_episode_transitions(list(self._ep_history))
+                        inc_layer.save()
+
+                    if self._restart_guard_warmup_remaining > 0:
+                        self._restart_guard_warmup_remaining -= 1
+                    self._restart_guard_episode_index += 1
 
                     self._save_shared_model()
 
@@ -1377,6 +2316,7 @@ class KGGuidedAgent(SmartAgent):
                     "frames": list(self._ep_history),
                     "result": self.end_game_state,
                     "score": float(hp_my - hp_enemy),
+                    "restart_guard": guard,
                 }
             )
             self._ep_history = []

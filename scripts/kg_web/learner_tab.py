@@ -7,6 +7,7 @@ import time
 import datetime
 import pickle
 import requests as _requests
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -24,9 +25,46 @@ from plotly.subplots import make_subplots
 import optuna
 
 from src import ROOT_DIR
+from kg_web.constants import get_bktree_threshold_defaults
 
 _RESULTS_DIR = ROOT_DIR / "output" / "learner_results"
 _TRAINING_RUNS_DIR = _RESULTS_DIR / "training_runs"
+
+
+def _is_valid_action_code(action_code) -> bool:
+    return (
+        isinstance(action_code, str)
+        and len(action_code) == 2
+        and action_code[0] in "01234"
+        and action_code[1] in "abcdefghijk"
+    )
+
+
+def _format_state_ref(state_id):
+    state_ref = str(state_id)
+    if state_ref.startswith("ood:"):
+        parts = state_ref.split(":")
+        base_nid = parts[1] if len(parts) > 1 else None
+        cluster = parts[2] if len(parts) > 2 else None
+        dist = parts[4][1:] if len(parts) > 4 and parts[4].startswith("d") else None
+        return {
+            "state_ref": state_ref,
+            "state_kind": "ood",
+            "base_nid": base_nid,
+            "state_cluster": cluster,
+            "ood_distance": dist,
+        }
+    try:
+        base_nid = int(state_id)
+    except Exception:
+        base_nid = None
+    return {
+        "state_ref": state_ref,
+        "state_kind": "etg",
+        "base_nid": base_nid,
+        "state_cluster": None,
+        "ood_distance": None,
+    }
 
 
 def _get_all_runs():
@@ -99,7 +137,7 @@ def _load_summary():
 
 
 @st.cache_resource(ttl=60, show_spinner=False)
-def _load_study():
+def _load_study(_run_key: str = ""):
     study_db = _get_active_study_db()
     if study_db and study_db.exists():
         try:
@@ -223,7 +261,7 @@ def _delete_trial(trial_number: int):
         if trial_dir.is_dir():
             shutil.rmtree(trial_dir, ignore_errors=True)
 
-    study = _load_study()
+    study = _load_study(st.session_state.get("_active_run", ""))
     if not study:
         return
     for t in study.trials:
@@ -277,15 +315,35 @@ def _get_run_info():
 
 
 def _delete_run(run_name: str):
+    import gc
+
     run_info = _get_run_info()
     if run_name not in run_info:
         return
     info = run_info[run_name]
     run_path = info["path"]
+
+    if _is_learner_alive():
+        _kill_learner_process()
+        time.sleep(1)
+    if "learner_proc" in st.session_state:
+        proc = st.session_state.get("learner_proc")
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+        del st.session_state["learner_proc"]
+
+    _clear_all_cache()
+    gc.collect()
+    time.sleep(0.3)
+
     if run_path == _RESULTS_DIR:
         study_db = run_path / "study.db"
         if study_db.exists():
-            study_db.unlink()
+            study_db.unlink(missing_ok=True)
         runs_dir = run_path / "runs"
         if runs_dir.exists():
             for f in runs_dir.glob("trial_*_run.json"):
@@ -298,17 +356,38 @@ def _delete_run(run_name: str):
         sp = run_path / "study_summary.json"
         sp.unlink(missing_ok=True)
     else:
+        study_db = run_path / "study.db"
+        for _attempt in range(5):
+            if not study_db.exists():
+                break
+            try:
+                study_db.unlink()
+            except Exception:
+                gc.collect()
+                time.sleep(0.5)
+        for _attempt in range(5):
+            if not run_path.exists():
+                break
+            try:
+                shutil.rmtree(str(run_path))
+            except Exception:
+                gc.collect()
+                time.sleep(0.5)
         if run_path.exists():
-            shutil.rmtree(run_path, ignore_errors=True)
+            for f in run_path.rglob("*"):
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            try:
+                run_path.rmdir()
+            except Exception:
+                pass
     _clear_all_cache()
 
 
 def _clear_all_cache():
     for fn in (
-        _load_study,
-        _compute_importance,
-        _load_trials_from_db,
-        _load_runs,
         _get_run_info,
         _load_finetune_runs,
     ):
@@ -458,13 +537,210 @@ def _start_learner():
     if expanded_masked:
         cmd.extend(["--masked_actions", ",".join(expanded_masked)])
 
-    restart_interval = st.session_state.get("learner_restart_interval", 50)
+    restart_interval = st.session_state.get("learner_restart_interval", 0)
     if restart_interval > 0:
         cmd.extend(["--restart_interval", str(restart_interval)])
+
+    if st.session_state.get("learner_use_counterfactual", False):
+        cmd.append("--enable_counterfactual")
+    if st.session_state.get("learner_use_action_tuning", False):
+        cmd.append("--enable_action_tuning")
 
     alpha = st.session_state.get("learner_alpha", 0.2)
     cap = st.session_state.get("learner_cap", 8.0)
     _save_obj_config(alpha, cap)
+    try:
+        import yaml as _yaml
+
+        cfg_path = ROOT_DIR / "configs" / "learner_config.yaml"
+        cfg = {}
+        if cfg_path.exists():
+            with open(str(cfg_path), "r", encoding="utf-8") as f:
+                cfg = _yaml.safe_load(f) or {}
+        tuning_enabled = st.session_state.get("learner_use_action_tuning", False)
+        exec_cfg = cfg.setdefault("execution", {})
+        exec_cfg["restart_interval"] = int(st.session_state.get("learner_restart_interval", 0))
+        exec_cfg["restart_on_phase_change"] = bool(
+            st.session_state.get("learner_restart_on_phase_change", True)
+        )
+        bktree_cfg = cfg.setdefault("bktree", {})
+        bktree_cfg["primary_threshold"] = float(
+            st.session_state.get("learner_bktree_primary_threshold", 1.0)
+        )
+        bktree_cfg["secondary_threshold"] = float(
+            st.session_state.get("learner_bktree_secondary_threshold", 0.5)
+        )
+        tuning_cfg = cfg.setdefault("action_tuning", {})
+        tuning_cfg["enabled"] = bool(tuning_enabled)
+        tuning_cfg["explore_rate"] = st.session_state.get(
+            "learner_tuning_explore_rate", tuning_cfg.get("explore_rate", 0.05)
+        )
+        tuning_cfg["min_confidence"] = st.session_state.get(
+            "learner_tuning_min_confidence", tuning_cfg.get("min_confidence", 0.35)
+        )
+        tuning_cfg["min_advantage"] = st.session_state.get(
+            "learner_tuning_min_advantage", tuning_cfg.get("min_advantage", 1.0)
+        )
+        tuning_cfg["ucb_c"] = st.session_state.get(
+            "learner_tuning_ucb_c", tuning_cfg.get("ucb_c", 1.4)
+        )
+        tuning_cfg["target_visits"] = st.session_state.get(
+            "learner_tuning_target_visits", tuning_cfg.get("target_visits", 10)
+        )
+        tuning_cfg["confidence_return_scale"] = st.session_state.get(
+            "learner_tuning_confidence_return_scale",
+            tuning_cfg.get("confidence_return_scale", 50.0),
+        )
+        tuning_cfg["validation_min_confidence"] = st.session_state.get(
+            "learner_tuning_validation_min_confidence",
+            tuning_cfg.get("validation_min_confidence", 0.10),
+        )
+        tuning_cfg["validation_min_advantage"] = st.session_state.get(
+            "learner_tuning_validation_min_advantage",
+            tuning_cfg.get("validation_min_advantage", 0.0),
+        )
+        tuning_cfg["validation_min_visits"] = st.session_state.get(
+            "learner_tuning_validation_min_visits",
+            tuning_cfg.get("validation_min_visits", 2),
+        )
+        tuning_cfg["ood_key_mode"] = st.session_state.get(
+            "learner_tuning_ood_key_mode",
+            tuning_cfg.get("ood_key_mode", "aggregate"),
+        )
+        tuning_cfg["ood_distance_bucket"] = st.session_state.get(
+            "learner_tuning_ood_distance_bucket",
+            tuning_cfg.get("ood_distance_bucket", 0.5),
+        )
+        tuning_cfg["max_nid_fallback_dist"] = st.session_state.get(
+            "learner_max_nid_fallback_dist",
+            tuning_cfg.get("max_nid_fallback_dist", 0.75),
+        )
+        tuning_cfg["max_nid_fallback_hp_dist"] = st.session_state.get(
+            "learner_max_nid_fallback_hp_dist",
+            tuning_cfg.get("max_nid_fallback_hp_dist", 1.5),
+        )
+        guard_cfg = tuning_cfg.setdefault("restart_guard", {})
+        guard_cfg["enabled"] = bool(
+            st.session_state.get("learner_restart_guard_enabled", True)
+        )
+        guard_cfg["warmup_episodes"] = int(
+            st.session_state.get("learner_restart_warmup_episodes", 10)
+        )
+        guard_cfg["max_ood_ratio"] = float(
+            st.session_state.get("learner_restart_guard_max_ood_ratio", 0.30)
+        )
+        guard_cfg["max_ood_mc_ratio"] = float(
+            st.session_state.get("learner_restart_guard_max_ood_mc_ratio", 0.30)
+        )
+        guard_cfg["max_episode_frames"] = int(
+            st.session_state.get("learner_restart_guard_max_episode_frames", 80)
+        )
+        guard_cfg["skip_model_update"] = bool(
+            st.session_state.get("learner_restart_guard_skip_model_update", True)
+        )
+        guard_cfg["skip_bad_results"] = bool(
+            st.session_state.get("learner_restart_guard_skip_bad_results", True)
+        )
+        guard_cfg["disable_ood_explore_on_violation"] = bool(
+            st.session_state.get("learner_restart_guard_disable_ood_explore", True)
+        )
+        guard_cfg["allow_high_score_ood_update"] = bool(
+            st.session_state.get("learner_restart_guard_allow_high_score_ood_update", True)
+        )
+        guard_cfg["high_score_ood_min_score"] = float(
+            st.session_state.get("learner_restart_guard_high_score_ood_min_score", 24.0)
+        )
+        phase_cfg = cfg.setdefault("phased_optimization", {})
+        phase_cfg["enabled"] = bool(st.session_state.get("learner_use_phased_optimization", False))
+        phase_cfg["mode"] = st.session_state.get("learner_phase_mode", "cycle")
+        phase_cfg["cycle"] = phase_cfg["mode"] == "cycle"
+        phase_cfg["exclude_exploration_from_optimization"] = bool(
+            st.session_state.get("learner_phase_exclude_explore", True)
+        )
+        phase_cfg["exploration_min_rate"] = float(
+            st.session_state.get("learner_phase_exploration_min_rate", 0.20)
+        )
+        phase_cfg["etg_target_objective"] = float(
+            st.session_state.get("learner_phase_etg_target_objective", 35.0)
+        )
+        phase_cfg["exploration_target_avg_score"] = float(
+            st.session_state.get("learner_phase_exploration_target_avg_score", 10.0)
+        )
+        phase_cfg["synergy_etg_pool_size"] = int(
+            st.session_state.get("learner_phase_synergy_etg_pool_size", 3)
+        )
+        phase_cfg["synergy_etg_selection"] = st.session_state.get(
+            "learner_phase_synergy_etg_selection", "weighted"
+        )
+        phase_cfg["synergy_etg_weights"] = [0.6, 0.25, 0.15]
+        phase_cfg["synergy_validation_min_confidence"] = float(
+            st.session_state.get("learner_phase_synergy_validation_min_confidence", 0.10)
+        )
+        phase_cfg["synergy_validation_min_advantage"] = float(
+            st.session_state.get("learner_phase_synergy_validation_min_advantage", 0.0)
+        )
+        phase_cfg["synergy_validation_min_visits"] = int(
+            st.session_state.get("learner_phase_synergy_validation_min_visits", 2)
+        )
+        phase_cfg["synergy_validation_sources"] = [
+            "ood",
+            "fallback",
+            "kg_relaxed",
+            "fuzzy_plan",
+            "diverge",
+        ]
+        phase_cfg["synergy_validation_profiles"] = {
+            "ood": {"min_confidence": 0.08, "min_advantage": 0.0, "min_visits": 2},
+            "fallback": {"min_confidence": 0.08, "min_advantage": 0.0, "min_visits": 2},
+            "kg_relaxed": {"min_confidence": 0.15, "min_advantage": 0.5, "min_visits": 3},
+            "diverge": {"min_confidence": 0.15, "min_advantage": 0.5, "min_visits": 3},
+            "fuzzy_plan": {"min_confidence": 0.15, "min_advantage": 0.5, "min_visits": 3},
+        }
+        phase_cfg["default_phase"] = "synergy"
+        phase_cfg["stages"] = [
+            {
+                "name": "etg_only",
+                "trials": int(st.session_state.get("learner_phase_etg_trials", 50)),
+                "min_trials": int(st.session_state.get("learner_phase_etg_min_trials", 20)),
+                "max_trials": int(st.session_state.get("learner_phase_etg_trials", 50)),
+                "target_objective": float(st.session_state.get("learner_phase_etg_target_objective", 35.0)),
+            },
+            {
+                "name": "exploration_only",
+                "trials": int(st.session_state.get("learner_phase_explore_trials", 50)),
+                "min_trials": int(st.session_state.get("learner_phase_explore_min_trials", 20)),
+                "max_trials": int(st.session_state.get("learner_phase_explore_trials", 50)),
+                "target_avg_score": float(st.session_state.get("learner_phase_exploration_target_avg_score", 10.0)),
+            },
+            {
+                "name": "synergy",
+                "trials": int(st.session_state.get("learner_phase_synergy_trials", 100)),
+                "min_trials": int(st.session_state.get("learner_phase_synergy_min_trials", 50)),
+                "max_trials": int(st.session_state.get("learner_phase_synergy_trials", 100)),
+            },
+        ]
+        inc_enabled = st.session_state.get("learner_use_incremental_layer", False)
+        inc_cfg = cfg.setdefault("incremental_layer", {})
+        inc_cfg["enabled"] = bool(inc_enabled)
+        inc_cfg["update_bktree"] = bool(
+            st.session_state.get("learner_incremental_update_bktree", False)
+        )
+        inc_cfg["update_etg_delta"] = bool(
+            st.session_state.get("learner_incremental_update_etg_delta", False)
+        )
+        inc_cfg["use_delta_for_planning"] = bool(
+            st.session_state.get("learner_incremental_use_delta_for_planning", False)
+        )
+        inc_cfg["persist_interval_episodes"] = st.session_state.get(
+            "learner_incremental_persist_interval",
+            inc_cfg.get("persist_interval_episodes", 10),
+        )
+        inc_cfg.setdefault("min_new_state_distance", 1.0)
+        inc_cfg.setdefault("delta_dir", "incremental_layer")
+        with open(str(cfg_path), "w", encoding="utf-8") as f:
+            _yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+    except Exception as e:
+        st.warning(f"动作微调配置保存失败: {e}")
 
     _TRAINING_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     existing = [
@@ -476,7 +752,7 @@ def _start_learner():
     new_run_name = f"run_{next_id:04d}"
     new_run_dir = _TRAINING_RUNS_DIR / new_run_name
     st.session_state["_new_run_dir"] = str(new_run_dir)
-    st.session_state["_active_run"] = new_run_name
+    st.session_state["_pending_active_run"] = new_run_name
 
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     run_dir = st.session_state.get("_new_run_dir", None)
@@ -736,9 +1012,11 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
     kg_file = kg_entry.get("file", "") if kg_entry else ""
     kg_name = kg_entry.get("name", "") if kg_entry else ""
     kg_data_dir = kg_entry.get("data_dir", "") if kg_entry else ""
+    kg_map_id = kg_entry.get("map_id", "") if kg_entry else ""
 
     st.session_state["_learner_kg_file"] = kg_file
     st.session_state["_learner_kg_data_dir"] = kg_data_dir
+    st.session_state["_learner_kg_map_id"] = kg_map_id
 
     if kg_file:
         st.caption(f"KG: {kg_name}")
@@ -780,8 +1058,32 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         if proc and proc.poll() is not None:
             del st.session_state.learner_proc
 
-    study = _load_study()
+    study = _load_study(st.session_state.get("_active_run", ""))
     running_trial = _get_running_trial(study)
+
+    threshold_defaults = get_bktree_threshold_defaults(kg_map_id)
+    st.markdown("**BKTree 阈值**")
+    tc1, tc2 = st.columns(2)
+    with tc1:
+        st.number_input(
+            "Primary",
+            min_value=0.0,
+            max_value=5.0,
+            value=float(threshold_defaults["primary_threshold"]),
+            step=0.05,
+            key="learner_bktree_primary_threshold",
+            help="规划决策阶段使用的 primary BKTree 最近邻接受阈值。",
+        )
+    with tc2:
+        st.number_input(
+            "Secondary",
+            min_value=0.0,
+            max_value=5.0,
+            value=float(threshold_defaults["secondary_threshold"]),
+            step=0.05,
+            key="learner_bktree_secondary_threshold",
+            help="规划决策阶段使用的 secondary BKTree 最近邻接受阈值。",
+        )
 
     st.divider()
 
@@ -827,9 +1129,15 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         "重启间隔（每N轮重启游戏客户端）",
         min_value=0,
         max_value=500,
-        value=50,
+        value=0,
         key="learner_restart_interval",
-        help="0 = 不重启。定期重启可清除游戏进程内积累的状态，Optuna 模型不受影响",
+        help="0 = 不按固定 trial 间隔重启。建议改用阶段切换重启。",
+    )
+    st.toggle(
+        "阶段切换时重启游戏客户端",
+        value=True,
+        key="learner_restart_on_phase_change",
+        help="每次 ETG / 探索 / 协同阶段切换前重启客户端，确保新阶段参数完整加载。",
     )
 
     st.divider()
@@ -930,6 +1238,287 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
         )
 
     st.divider()
+    st.markdown("**蒙特卡洛动作微调探索**")
+
+    st.toggle(
+        "启用动作微调探索",
+        value=False,
+        key="learner_use_action_tuning",
+        help="在参数寻优过程中维护独立动作微调模型，通过 UCB 探索与置信度路由判断使用 ETG 还是微调动作。",
+    )
+    if st.session_state.get("learner_use_action_tuning", False):
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            st.slider(
+                "探索率",
+                0.0,
+                0.5,
+                0.05,
+                step=0.01,
+                key="learner_tuning_explore_rate",
+                help="非低置信状态下仍随机触发 UCB 探索的概率",
+            )
+            st.slider(
+                "最小置信度",
+                0.0,
+                1.0,
+                0.35,
+                step=0.05,
+                key="learner_tuning_min_confidence",
+            )
+        with col_t2:
+            st.number_input(
+                "最小优势",
+                min_value=0.0,
+                max_value=50.0,
+                value=1.0,
+                step=0.5,
+                key="learner_tuning_min_advantage",
+            )
+            st.number_input(
+                "UCB 系数",
+                min_value=0.0,
+                max_value=5.0,
+                value=1.4,
+                step=0.1,
+                key="learner_tuning_ucb_c",
+            )
+        st.number_input(
+            "目标访问次数",
+            min_value=1,
+            max_value=100,
+            value=10,
+            step=1,
+            key="learner_tuning_target_visits",
+        )
+        st.number_input(
+            "confidence return scale",
+            min_value=1.0,
+            max_value=200.0,
+            value=50.0,
+            step=5.0,
+            key="learner_tuning_confidence_return_scale",
+            help="Larger values reduce the penalty from high return variance when computing action-tuning confidence.",
+        )
+        col_v1, col_v2, col_v3 = st.columns(3)
+        with col_v1:
+            st.slider(
+                "validation min confidence",
+                0.0,
+                1.0,
+                0.10,
+                step=0.05,
+                key="learner_tuning_validation_min_confidence",
+                help="Lower gate used only for OOD/fallback/kg_relaxed validation opportunities.",
+            )
+        with col_v2:
+            st.number_input(
+                "validation min advantage",
+                min_value=0.0,
+                max_value=50.0,
+                value=0.0,
+                step=0.5,
+                key="learner_tuning_validation_min_advantage",
+            )
+        with col_v3:
+            st.number_input(
+                "validation min visits",
+                min_value=1,
+                max_value=100,
+                value=2,
+                step=1,
+                key="learner_tuning_validation_min_visits",
+            )
+        col_key1, col_key2 = st.columns(2)
+        with col_key1:
+            st.selectbox(
+                "OOD state key",
+                ["aggregate", "exact"],
+                index=0,
+                key="learner_tuning_ood_key_mode",
+                help="aggregate groups OOD states by candidate_nid + cluster + distance bucket; exact keeps hash keys.",
+            )
+        with col_key2:
+            st.number_input(
+                "OOD distance bucket",
+                min_value=0.05,
+                max_value=5.0,
+                value=0.5,
+                step=0.05,
+                key="learner_tuning_ood_distance_bucket",
+            )
+        col_nid1, col_nid2 = st.columns(2)
+        with col_nid1:
+            st.number_input(
+                "NID fallback 最大距离",
+                min_value=0.0,
+                max_value=5.0,
+                value=0.75,
+                step=0.05,
+                key="learner_max_nid_fallback_dist",
+                help="超过该距离时拒绝最近邻 nid，改走 OOD 动作微调通道。",
+            )
+        with col_nid2:
+            st.number_input(
+                "NID fallback 最大 HP 距离",
+                min_value=0.0,
+                max_value=10.0,
+                value=1.5,
+                step=0.1,
+                key="learner_max_nid_fallback_hp_dist",
+            )
+        st.markdown("**RestartGuard / OOD 熔断**")
+        st.toggle(
+            "启用重启后保护",
+            value=True,
+            key="learner_restart_guard_enabled",
+            help="重启后 warm-up 期间只记录不更新模型，并在 OOD 过高时熔断 OOD 探索。",
+        )
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.number_input(
+                "Warm-up episodes",
+                min_value=0,
+                max_value=100,
+                value=10,
+                step=1,
+                key="learner_restart_warmup_episodes",
+            )
+            st.number_input(
+                "最大 OOD 占比",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.30,
+                step=0.05,
+                key="learner_restart_guard_max_ood_ratio",
+            )
+        with col_g2:
+            st.number_input(
+                "最大 OOD 探索占比",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.30,
+                step=0.05,
+                key="learner_restart_guard_max_ood_mc_ratio",
+            )
+            st.number_input(
+                "最长 episode 帧数",
+                min_value=0,
+                max_value=500,
+                value=80,
+                step=5,
+                key="learner_restart_guard_max_episode_frames",
+            )
+        c_guard1, c_guard2, c_guard3 = st.columns(3)
+        with c_guard1:
+            st.toggle("跳过模型更新", value=True, key="learner_restart_guard_skip_model_update")
+        with c_guard2:
+            st.toggle("跳过坏结果更新", value=True, key="learner_restart_guard_skip_bad_results")
+        with c_guard3:
+            st.toggle("熔断 OOD 探索", value=True, key="learner_restart_guard_disable_ood_explore")
+        c_guard4, c_guard5 = st.columns(2)
+        with c_guard4:
+            st.toggle(
+                "allow high-score OOD update",
+                value=True,
+                key="learner_restart_guard_allow_high_score_ood_update",
+                help="High-score OOD wins can still update action tuning instead of being discarded.",
+            )
+        with c_guard5:
+            st.number_input(
+                "high-score OOD min score",
+                min_value=-100.0,
+                max_value=200.0,
+                value=24.0,
+                step=1.0,
+                key="learner_restart_guard_high_score_ood_min_score",
+            )
+
+    st.divider()
+    st.markdown("**分阶段协同优化**")
+    st.toggle(
+        "启用 ETG / 探索 / 协同三阶段",
+        value=False,
+        key="learner_use_phased_optimization",
+        help="阶段 A 仅 ETG 参数寻优；阶段 B 冻结 ETG 参数并强化动作微调探索；阶段 C 同时启用 ETG 与动作微调。",
+    )
+    if st.session_state.get("learner_use_phased_optimization", False):
+        st.selectbox(
+            "阶段调度模式",
+            ["cycle", "adaptive"],
+            index=0,
+            key="learner_phase_mode",
+            help="cycle=按 ETG/探索/协同循环；adaptive=阶段达到目标或最大 trial 后切换。",
+        )
+        st.toggle(
+            "探索阶段不更新参数寻优模型",
+            value=True,
+            key="learner_phase_exclude_explore",
+            help="开启后 Exploration-only trial 只用于动作微调探索和日志，不作为 Optuna 参数优化样本。",
+        )
+        c_phase1, c_phase2, c_phase3 = st.columns(3)
+        with c_phase1:
+            st.number_input("ETG-only trials", min_value=0, max_value=1000, value=20, step=5, key="learner_phase_etg_trials")
+            st.number_input("ETG min trials", min_value=1, max_value=1000, value=10, step=5, key="learner_phase_etg_min_trials")
+        with c_phase2:
+            st.number_input("Exploration-only trials", min_value=0, max_value=1000, value=20, step=5, key="learner_phase_explore_trials")
+            st.number_input("Explore min trials", min_value=1, max_value=1000, value=10, step=5, key="learner_phase_explore_min_trials")
+        with c_phase3:
+            st.number_input("Synergy trials", min_value=0, max_value=1000, value=50, step=5, key="learner_phase_synergy_trials")
+            st.number_input("Synergy min trials", min_value=1, max_value=1000, value=20, step=5, key="learner_phase_synergy_min_trials")
+            st.number_input("Synergy ETG pool size", min_value=1, max_value=20, value=3, step=1, key="learner_phase_synergy_etg_pool_size")
+            st.selectbox("Synergy ETG selection", ["weighted", "round_robin", "best"], index=0, key="learner_phase_synergy_etg_selection")
+        st.number_input(
+            "探索阶段最小探索率",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.20,
+            step=0.05,
+            key="learner_phase_exploration_min_rate",
+        )
+        c_target1, c_target2 = st.columns(2)
+        with c_target1:
+            st.number_input("ETG 阶段目标 Objective", min_value=-100.0, max_value=200.0, value=35.0, step=1.0, key="learner_phase_etg_target_objective")
+        with c_target2:
+            st.number_input("探索阶段目标 Avg Score", min_value=-100.0, max_value=200.0, value=10.0, step=1.0, key="learner_phase_exploration_target_avg_score")
+
+    st.divider()
+    st.markdown("**增量层实验开关**")
+    st.toggle(
+        "启用增量层（默认不影响原 ETG/BKTree）",
+        value=False,
+        key="learner_use_incremental_layer",
+        help="启用后仅写入独立 delta 目录；除非开启 use_delta_for_planning，否则不参与规划。",
+    )
+    if st.session_state.get("learner_use_incremental_layer", False):
+        st.checkbox(
+            "写入 ETG delta",
+            value=False,
+            key="learner_incremental_update_etg_delta",
+            help="将在线 episode 中的状态转移动作统计写入 etg_delta.pkl，不修改原 ETG。",
+        )
+        st.checkbox(
+            "写入 BKTree delta（预留）",
+            value=False,
+            key="learner_incremental_update_bktree",
+            help="当前仅保留开关与配置，后续实现新增 BKTree 节点写入。",
+        )
+        st.checkbox(
+            "规划时使用 delta（预留）",
+            value=False,
+            key="learner_incremental_use_delta_for_planning",
+            help="当前仅保留开关与配置，后续实现 base ETG + delta ETG 合并视图。",
+        )
+        st.number_input(
+            "持久化间隔 episode",
+            min_value=1,
+            max_value=100,
+            value=10,
+            step=1,
+            key="learner_incremental_persist_interval",
+        )
+
+    st.divider()
 
     if st.button(
         "查看/编辑搜索空间", use_container_width=True, key="learner_toggle_space"
@@ -960,6 +1549,10 @@ def _get_filtered_trials(study):
 
 
 def _render_run_selector(key="_active_run"):
+    pending = st.session_state.pop("_pending_active_run", None)
+    if pending:
+        st.session_state[key] = pending
+        _clear_all_cache()
     run_info = _get_run_info()
     all_runs = _get_all_runs()
     if not all_runs:
@@ -974,6 +1567,7 @@ def _render_run_selector(key="_active_run"):
     current = st.session_state.get(key, options[0])
     if current not in options:
         current = options[0]
+        st.session_state[key] = current
     prev = current
     sel = st.radio(
         "Training Run",
@@ -1051,7 +1645,7 @@ def _render_conclusion_panel(filtered_trials):
             st.markdown(f"**{k}**: {txt}")
 
     st.markdown("**关键发现**")
-    importance = _compute_importance()
+    importance = _compute_importance(st.session_state.get("_active_run", ""))
     if importance:
         sorted_imp = sorted(importance.items(), key=lambda x: -x[1])
         top_param = sorted_imp[0][0] if sorted_imp else ""
@@ -1152,15 +1746,133 @@ def _plot_objective_history(study):
     best_val = -float("inf")
 
     for t in study.trials:
-        if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None:
+        plot_value = t.value
+        if plot_value is None and t.user_attrs.get("probe_objective") is not None:
+            plot_value = t.user_attrs.get("probe_objective")
+        if t.state in (optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED) and plot_value is not None:
             trial_numbers.append(t.number)
-            values.append(t.value)
-            best_val = max(best_val, t.value)
+            values.append(float(plot_value))
+            if not t.user_attrs.get("exclude_from_parameter_optimization", False):
+                best_val = max(best_val, float(plot_value))
+            elif best_val == -float("inf"):
+                best_val = float(plot_value)
             best_so_far.append(best_val)
 
     if not trial_numbers:
         st.info("没有完成的试验。")
         return
+
+    phase_colors = {
+        "etg_only": "#636EFA",
+        "exploration_only": "#00CC96",
+        "synergy": "#AB63FA",
+        "etg_focus": "#636EFA",
+        "explore_focus": "#00CC96",
+        "synergy_focus": "#AB63FA",
+    }
+    phase_fill_colors = {
+        "etg_only": "rgba(99, 110, 250, 0.12)",
+        "exploration_only": "rgba(0, 204, 150, 0.14)",
+        "synergy": "rgba(171, 99, 250, 0.12)",
+        "etg_focus": "rgba(99, 110, 250, 0.10)",
+        "explore_focus": "rgba(0, 204, 150, 0.12)",
+        "synergy_focus": "rgba(171, 99, 250, 0.10)",
+    }
+    phase_labels = {
+        "etg_only": "ETG-only",
+        "exploration_only": "Exploration-only",
+        "synergy": "ETG + 微调协同",
+        "etg_focus": "ETG 参数寻优占优",
+        "explore_focus": "动作探索占优",
+        "synergy_focus": "ETG + 微调协同",
+    }
+    phase_by_trial = {}
+    for t in study.trials:
+        if t.state in (optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED):
+            phase = t.user_attrs.get("phase")
+            if phase:
+                phase_by_trial[int(t.number)] = str(phase)
+    source_stats_df = pd.DataFrame()
+    try:
+        source_stats_df = _collect_action_source_stats()
+        source_df = source_stats_df if not phase_by_trial else pd.DataFrame()
+        if not source_df.empty and "trial" in source_df:
+            phase_points = []
+            for r in source_df.sort_values("trial").itertuples(index=False):
+                trial = int(getattr(r, "trial"))
+                etg_ratio = float(getattr(r, "kg_plan_ratio", 0.0) or 0.0) + float(
+                    getattr(r, "kg_follow_ratio", 0.0) or 0.0
+                ) + float(getattr(r, "kg_relaxed_ratio", 0.0) or 0.0)
+                explore_ratio = sum(
+                    float(getattr(r, col, 0.0) or 0.0)
+                    for col in (
+                        "mc_explore_ratio",
+                        "ood_mc_explore_ratio",
+                        "ood_ratio",
+                        "fallback_ratio",
+                    )
+                )
+                tune_ratio = float(getattr(r, "tuning_ratio", 0.0) or 0.0) + float(
+                    getattr(r, "ood_tuning_ratio", 0.0) or 0.0
+                )
+                if etg_ratio >= 0.50 and tune_ratio + explore_ratio < 0.35:
+                    phase = "etg_focus"
+                elif explore_ratio >= 0.50 and etg_ratio < 0.35:
+                    phase = "explore_focus"
+                else:
+                    phase = "synergy_focus"
+                phase_points.append((trial, phase))
+            if phase_points:
+                phase_by_trial = dict(phase_points)
+    except Exception:
+        phase_by_trial = {}
+
+    def _add_phase_regions(target_fig, y0, y1):
+        if not phase_by_trial:
+            return
+        phase_seen = set()
+        sorted_trials = [t for t in trial_numbers if t in phase_by_trial]
+        if sorted_trials:
+            start_trial = sorted_trials[0]
+            current_phase = phase_by_trial[start_trial]
+            prev_trial = start_trial
+            intervals = []
+            for trial in sorted_trials[1:]:
+                phase = phase_by_trial.get(trial)
+                if phase != current_phase or trial != prev_trial + 1:
+                    intervals.append((start_trial, prev_trial, current_phase))
+                    start_trial = trial
+                    current_phase = phase
+                prev_trial = trial
+            intervals.append((start_trial, prev_trial, current_phase))
+
+            for start_trial, end_trial, phase_key in intervals:
+                if phase_key not in phase_labels:
+                    continue
+                showlegend = phase_key not in phase_seen
+                phase_seen.add(phase_key)
+                fig.add_trace(
+                    go.Scatter(
+                        x=[start_trial - 0.5, end_trial + 0.5, end_trial + 0.5, start_trial - 0.5, start_trial - 0.5],
+                        y=[y0, y0, y1, y1, y0],
+                        fill="toself",
+                        fillcolor=phase_fill_colors.get(phase_key, "rgba(200,200,200,0.10)"),
+                        line=dict(width=0, color=phase_colors.get(phase_key, "rgba(200,200,200,0.2)")),
+                        mode="lines",
+                        name=phase_labels[phase_key],
+                        legendgroup=f"phase_{phase_key}",
+                        showlegend=showlegend,
+                        hoverinfo="skip",
+                    )
+                )
+
+    if phase_by_trial:
+        y_min = min(values)
+        y_max = max(values)
+        y_margin = max((y_max - y_min) * 0.08, 1.0)
+        y0 = y_min - y_margin
+        y1 = y_max + y_margin
+        _add_phase_regions(fig, y0, y1)
 
     fig.add_trace(
         go.Scatter(
@@ -1187,13 +1899,136 @@ def _plot_objective_history(study):
         yaxis_title="Objective",
         height=350,
         margin=dict(l=50, r=30, t=50, b=40),
+        yaxis=dict(range=[min(values) - max((max(values) - min(values)) * 0.08, 1.0), max(values) + max((max(values) - min(values)) * 0.08, 1.0)]),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            groupclick="togglegroup",
+        ),
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    if not source_stats_df.empty and "trial" in source_stats_df:
+        balance_df = source_stats_df.sort_values("trial").copy()
+        etg_direct = (
+            balance_df.get("kg_plan_ratio", 0)
+            + balance_df.get("kg_follow_ratio", 0)
+            + balance_df.get("kg_relaxed_ratio", 0)
+        )
+        raw_explore = (
+            balance_df.get("mc_explore_ratio", 0)
+            + balance_df.get("ood_mc_explore_ratio", 0)
+        )
+        guard_keep = 1.0 - balance_df.get("guard_skip_update_ratio", 0).clip(0, 1)
+        explore_update = raw_explore * guard_keep
+        tuning_use = (
+            balance_df.get("tuning_ratio", 0)
+            + balance_df.get("ood_tuning_ratio", 0)
+        )
+        denominator = (etg_direct + explore_update + tuning_use).replace(0, np.nan)
+        balance_df["explore_etg_balance"] = (
+            (explore_update - etg_direct) / denominator
+        ).fillna(0).clip(-1, 1)
+        balance_df["tuning_conversion"] = (
+            tuning_use - raw_explore
+        ).fillna(0).clip(-1, 1)
+        balance_df["etg_external_signal"] = (
+            balance_df.get("nid_ood_ratio", 0)
+            + balance_df.get("fallback_ratio", 0)
+            + balance_df.get("ood_ratio", 0)
+        ).clip(0, 1)
+
+        balance_fig = go.Figure()
+        _add_phase_regions(balance_fig, -1.0, 1.0)
+        balance_fig.add_trace(
+            go.Scatter(
+                x=balance_df["trial"],
+                y=balance_df["explore_etg_balance"],
+                mode="lines+markers",
+                name="探索更新 - ETG利用平衡",
+                line=dict(color="#00CC96", width=2),
+            )
+        )
+        balance_fig.add_trace(
+            go.Scatter(
+                x=balance_df["trial"],
+                y=balance_df["tuning_conversion"],
+                mode="lines+markers",
+                name="微调利用 - 主动探索转化",
+                line=dict(color="#AB63FA", width=2),
+            )
+        )
+        balance_fig.add_trace(
+            go.Scatter(
+                x=balance_df["trial"],
+                y=balance_df["etg_external_signal"],
+                mode="lines",
+                name="ETG外/不确定信号",
+                line=dict(color="#FFA15A", width=1.5, dash="dot"),
+            )
+        )
+        if "tuning_opportunity_ratio" in balance_df:
+            balance_fig.add_trace(
+                go.Scatter(
+                    x=balance_df["trial"],
+                    y=balance_df["tuning_opportunity_ratio"],
+                    mode="lines+markers",
+                    name="tuning opportunity ratio",
+                    line=dict(color="#19D3F3", width=2, dash="dash"),
+                )
+            )
+        if "tuning_accept_per_opportunity" in balance_df:
+            balance_fig.add_trace(
+                go.Scatter(
+                    x=balance_df["trial"],
+                    y=balance_df["tuning_accept_per_opportunity"],
+                    mode="lines+markers",
+                    name="tuning accept/opportunity",
+                    line=dict(color="#FF6692", width=2, dash="dash"),
+                )
+            )
+        if "tuning_candidate_eligible_ratio" in balance_df:
+            balance_fig.add_trace(
+                go.Scatter(
+                    x=balance_df["trial"],
+                    y=balance_df["tuning_candidate_eligible_ratio"],
+                    mode="lines+markers",
+                    name="eligible tuning candidate ratio",
+                    line=dict(color="#B6E880", width=2, dash="dot"),
+                )
+            )
+        balance_fig.add_hline(y=0, line=dict(color="rgba(80,80,80,0.45)", width=1))
+        balance_fig.add_hline(y=1, line=dict(color="rgba(80,80,80,0.20)", width=1, dash="dot"))
+        balance_fig.add_hline(y=-1, line=dict(color="rgba(80,80,80,0.20)", width=1, dash="dot"))
+        balance_fig.update_layout(
+            title="ETG 利用 ↔ 探索微调平衡变化",
+            xaxis_title="Trial #",
+            yaxis_title="Balance Index (-1=ETG利用, +1=探索更新)",
+            yaxis=dict(range=[-1.05, 1.05]),
+            height=350,
+            margin=dict(l=50, r=30, t=50, b=40),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                groupclick="togglegroup",
+            ),
+        )
+        st.caption(
+            "`探索更新 - ETG利用平衡` 越接近 +1 表示探索并可更新模型越多，越接近 -1 表示直接利用 ETG 越多；"
+            "`微调利用 - 主动探索转化` 越高表示已学到的微调动作开始替代主动探索。"
+        )
+        st.plotly_chart(balance_fig, use_container_width=True)
+
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _compute_importance():
-    study = _load_study()
+def _compute_importance(_run_key: str = ""):
+    study = _load_study(_run_key)
     if not study or len(study.trials) < 5:
         return None
     try:
@@ -1207,7 +2042,7 @@ def _plot_importance(study):
         st.info("试验数据不足，至少需要 5 轮完成才能计算参数重要性。")
         return
 
-    importance = _compute_importance()
+    importance = _compute_importance(st.session_state.get("_active_run", ""))
     if importance is None:
         st.info("无法计算参数重要性（可能缺少足够的参数变化）。")
         return
@@ -1673,7 +2508,7 @@ def _plot_contour(study):
     if len(completed) < 10:
         st.info("试验数据不足（至少 10 轮）。")
         return []
-    importance = _compute_importance() or {}
+    importance = _compute_importance(st.session_state.get("_active_run", "")) or {}
     all_pairs = _compute_pair_importance(completed, importance)
     if not all_pairs:
         st.info("无可用参数对。")
@@ -1847,7 +2682,7 @@ _CATEGORICAL_PARAM_MAP = {
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _load_trials_from_db():
+def _load_trials_from_db(_run_key: str = ""):
     study_db = _get_active_study_db()
     if not study_db or not study_db.exists():
         return []
@@ -1990,10 +2825,10 @@ def _filter_rows(rows, keyword):
 
 
 def _render_trials_table():
-    study = _load_study()
-    runs = _load_runs()
+    study = _load_study(st.session_state.get("_active_run", ""))
+    runs = _load_runs(st.session_state.get("_active_run", ""))
 
-    all_rows = _load_trials_from_db()
+    all_rows = _load_trials_from_db(st.session_state.get("_active_run", ""))
     if not all_rows and runs:
         for run in runs:
             all_rows.append(
@@ -2124,7 +2959,7 @@ def _render_trials_table():
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _load_runs():
+def _load_runs(_run_key: str = ""):
     runs = []
     runs_dir = _get_active_runs_dir()
     if not runs_dir or not runs_dir.exists():
@@ -2161,7 +2996,7 @@ def _read_trial_progress(trial_num, target_episodes):
 
 
 def _render_run_monitor():
-    runs = _load_runs()
+    runs = _load_runs(st.session_state.get("_active_run", ""))
 
     if not runs:
         st.info("暂无运行记录。启动参数寻优后将自动记录。")
@@ -2345,6 +3180,501 @@ def _render_run_monitor():
         st.caption("暂无日志文件。")
 
 
+def _load_action_tuning_model():
+    run_path = _get_active_run_path()
+    if run_path is None:
+        return None, None
+    model_path = run_path / "action_tuning_model.pkl"
+    if not model_path.exists():
+        return None, model_path
+    try:
+        from src.decision.action_tuning_model import ActionTuningModel
+
+        return ActionTuningModel.load(str(model_path)), model_path
+    except Exception as e:
+        st.error(f"动作微调模型加载失败: {e}")
+        return None, model_path
+
+
+def _collect_action_source_stats():
+    trials_dir = _get_active_trials_dir()
+    if trials_dir is None or not trials_dir.exists():
+        return pd.DataFrame()
+    rows = []
+    for ep_file in sorted(trials_dir.glob("trial_*/episodes.jsonl")):
+        try:
+            trial_number = int(ep_file.parent.name.split("_")[-1])
+        except Exception:
+            trial_number = None
+        counters = {}
+        nid_counters = {}
+        guard_skip = 0
+        guard_disable = 0
+        tuning_decision = 0
+        tuning_opportunity = 0
+        tuning_accept = 0
+        tuning_accept_without_opportunity = 0
+        tuning_candidate_eligible = 0
+        tuning_validation_opportunity = 0
+        tuning_validation_accept = 0
+        episodes = 0
+        scores = []
+        try:
+            with open(str(ep_file), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    episodes += 1
+                    scores.append(float(rec.get("score", 0.0)))
+                    guard = rec.get("restart_guard") or {}
+                    if guard.get("skip_update"):
+                        guard_skip += 1
+                    if guard.get("disable_ood_explore"):
+                        guard_disable += 1
+                    for fr in rec.get("frames", []):
+                        src = fr.get("action_source", "unknown")
+                        counters[src] = counters.get(src, 0) + 1
+                        status = fr.get("nid_status") or "unknown"
+                        nid_counters[status] = nid_counters.get(status, 0) + 1
+                        plan = fr.get("plan") or {}
+                        tuning_info = plan.get("action_tuning") or fr.get("action_tuning") or {}
+                        if tuning_info:
+                            tuning_decision += 1
+                            has_opportunity = bool(tuning_info.get("opportunity"))
+                            if tuning_info.get("opportunity"):
+                                tuning_opportunity += 1
+                            if tuning_info.get("candidate_eligible"):
+                                tuning_candidate_eligible += 1
+                            if tuning_info.get("validation"):
+                                tuning_validation_opportunity += 1
+                            if src in ("tuning", "ood_tuning"):
+                                tuning_accept += 1
+                                if not has_opportunity:
+                                    tuning_accept_without_opportunity += 1
+                                if tuning_info.get("validation"):
+                                    tuning_validation_accept += 1
+        except Exception:
+            continue
+        total = sum(counters.values())
+        if total <= 0:
+            continue
+        row = {
+            "trial": trial_number,
+            "episodes": episodes,
+            "avg_score": float(np.mean(scores)) if scores else 0.0,
+            "total_actions": total,
+            "guard_skip_update": guard_skip,
+            "guard_disable_ood": guard_disable,
+            "guard_skip_update_ratio": guard_skip / max(episodes, 1),
+            "guard_disable_ood_ratio": guard_disable / max(episodes, 1),
+            "tuning_decision": tuning_decision,
+            "tuning_opportunity": tuning_opportunity,
+            "tuning_accept": tuning_accept,
+            "tuning_accept_without_opportunity": tuning_accept_without_opportunity,
+            "tuning_candidate_eligible": tuning_candidate_eligible,
+            "tuning_validation_opportunity": tuning_validation_opportunity,
+            "tuning_validation_accept": tuning_validation_accept,
+            "tuning_opportunity_ratio": tuning_opportunity / total,
+            "tuning_accept_ratio": tuning_accept / total,
+            "tuning_accept_per_opportunity": tuning_accept
+            / max(tuning_opportunity + tuning_accept_without_opportunity, 1),
+            "tuning_accept_per_decision": tuning_accept / max(tuning_decision, 1),
+            "tuning_candidate_eligible_ratio": tuning_candidate_eligible / total,
+            "tuning_validation_opportunity_ratio": tuning_validation_opportunity / total,
+            "tuning_validation_accept_ratio": tuning_validation_accept / total,
+            "tuning_validation_accept_per_opportunity": tuning_validation_accept
+            / max(tuning_validation_opportunity, 1),
+        }
+        for key in (
+            "kg_plan",
+            "kg_follow",
+            "tuning",
+            "mc_explore",
+            "ood",
+            "ood_mc_explore",
+            "ood_tuning",
+            "fallback",
+            "ft_plan",
+            "kg_relaxed",
+            "fuzzy_plan",
+        ):
+            row[key] = counters.get(key, 0)
+            row[f"{key}_ratio"] = counters.get(key, 0) / total
+        for key in ("exact", "near_valid", "near_rejected", "missing"):
+            row[f"nid_{key}"] = nid_counters.get(key, 0)
+            row[f"nid_{key}_ratio"] = nid_counters.get(key, 0) / total
+        row["nid_ood_ratio"] = (
+            nid_counters.get("near_rejected", 0) + nid_counters.get("missing", 0)
+        ) / total
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _load_trial_objectives() -> Dict[int, float]:
+    study_db = _get_active_study_db()
+    if study_db is None or not study_db.exists():
+        return {}
+    import sqlite3 as _sqlite
+
+    try:
+        db = _sqlite.connect(str(study_db))
+        cur = db.cursor()
+        cur.execute("""
+            SELECT t.number, tv.value
+            FROM trials t
+            JOIN trial_values tv ON t.trial_id = tv.trial_id
+            WHERE tv.value IS NOT NULL
+        """)
+        rows = cur.fetchall()
+        db.close()
+        return {int(num): float(value) for num, value in rows}
+    except Exception:
+        return {}
+
+
+def _collect_high_score_ood_candidates(top_quantile: float = 0.25, max_rows: int = 100):
+    trials_dir = _get_active_trials_dir()
+    if trials_dir is None or not trials_dir.exists():
+        return pd.DataFrame()
+    objectives = _load_trial_objectives()
+    if not objectives:
+        return pd.DataFrame()
+    values = [v for v in objectives.values() if v is not None]
+    if not values:
+        return pd.DataFrame()
+    threshold = float(np.quantile(values, max(0.0, min(1.0, 1.0 - top_quantile))))
+
+    stats = {}
+    action_counts = defaultdict(Counter)
+    source_counts = defaultdict(Counter)
+    trial_sets = defaultdict(set)
+    distance_values = defaultdict(list)
+
+    for ep_file in sorted(trials_dir.glob("trial_*/episodes.jsonl")):
+        try:
+            trial_number = int(ep_file.parent.name.split("_")[-1])
+        except Exception:
+            continue
+        objective = objectives.get(trial_number)
+        if objective is None or objective < threshold:
+            continue
+        try:
+            with open(str(ep_file), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    episode_score = float(rec.get("score", 0.0))
+                    for fr in rec.get("frames", []):
+                        status = fr.get("nid_status")
+                        if status not in ("near_rejected", "missing") and not fr.get("nid_is_ood"):
+                            continue
+                        state_key = fr.get("state_key") or fr.get("nid") or "unknown"
+                        state_key = str(state_key)
+                        row = stats.setdefault(
+                            state_key,
+                            {
+                                "state_key": state_key,
+                                "visits": 0,
+                                "episodes": 0,
+                                "score_sum": 0.0,
+                                "objective_sum": 0.0,
+                                "candidate_nid": fr.get("nid_candidate"),
+                                "nid_status": status or "unknown",
+                            },
+                        )
+                        row["visits"] += 1
+                        row["score_sum"] += episode_score
+                        row["objective_sum"] += objective
+                        trial_sets[state_key].add(trial_number)
+                        action_code = fr.get("action_code", "unknown")
+                        if not _is_valid_action_code(action_code):
+                            action_code = "invalid"
+                        action_counts[state_key][action_code] += 1
+                        source_counts[state_key][fr.get("action_source", "unknown")] += 1
+                        if fr.get("nid_distance") is not None:
+                            try:
+                                distance_values[state_key].append(float(fr.get("nid_distance")))
+                            except Exception:
+                                pass
+        except Exception:
+            continue
+
+    rows = []
+    for state_key, row in stats.items():
+        visits = max(int(row["visits"]), 1)
+        valid_action_counts = Counter(
+            {k: v for k, v in action_counts[state_key].items() if _is_valid_action_code(k)}
+        )
+        if valid_action_counts:
+            top_action, top_action_count = valid_action_counts.most_common(1)[0]
+        else:
+            top_action, top_action_count = "invalid", action_counts[state_key].get("invalid", 0)
+        top_source, top_source_count = source_counts[state_key].most_common(1)[0]
+        distances = distance_values.get(state_key, [])
+        rows.append(
+            {
+                "state_key": state_key,
+                "visits": visits,
+                "trial_count": len(trial_sets[state_key]),
+                "avg_score": row["score_sum"] / visits,
+                "avg_objective": row["objective_sum"] / visits,
+                "top_action": top_action,
+                "top_action_ratio": top_action_count / visits,
+                "invalid_action_count": action_counts[state_key].get("invalid", 0),
+                "top_source": top_source,
+                "top_source_ratio": top_source_count / visits,
+                "avg_nid_distance": float(np.mean(distances)) if distances else None,
+                "candidate_nid": row.get("candidate_nid"),
+                "nid_status": row.get("nid_status"),
+                "phase_hint": "promote_candidate" if visits >= 10 and len(trial_sets[state_key]) >= 2 else "observe",
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.sort_values(
+        ["avg_score", "visits", "trial_count"], ascending=[False, False, False]
+    ).head(max_rows)
+
+
+def _render_action_tuning_tab():
+    st.markdown("### 蒙特卡洛动作微调探索效果")
+    model, model_path = _load_action_tuning_model()
+    if model_path is not None:
+        st.caption(f"模型路径: `{model_path}`")
+    if model is None:
+        st.info("当前 Run 暂无 `action_tuning_model.pkl`。启用动作微调探索并完成至少一个 episode 后生成。")
+    else:
+        summary = model.get_summary()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("状态数", summary.get("total_states", 0))
+        c2.metric("状态-动作对", summary.get("total_pairs", 0))
+        c3.metric("总访问", summary.get("total_visits", 0))
+        c4.metric("训练局数", summary.get("trained_episodes", 0))
+
+        rows = []
+        for sid, actions in model.state_action_stats.items():
+            state_info = _format_state_ref(sid)
+            for action, stats in actions.items():
+                rows.append(
+                    {
+                        **state_info,
+                        "action": action,
+                        "visits": stats.visits,
+                        "wins": stats.wins,
+                        "mean_return": stats.mean_return,
+                        "std_return": stats.std_return,
+                        "confidence": stats.confidence,
+                        "ucb_score": model.ucb_score(sid, action)
+                        if stats.visits > 0
+                        else None,
+                    }
+                )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["state_ref"] = df["state_ref"].astype(str)
+            df["state_kind"] = df["state_kind"].astype(str)
+            df["base_nid"] = pd.to_numeric(df["base_nid"], errors="coerce").astype("Int64")
+            df["state_cluster"] = df["state_cluster"].astype("string")
+            df["ood_distance"] = pd.to_numeric(df["ood_distance"], errors="coerce")
+            st.markdown("**状态-动作价值表**")
+            st.caption(
+                "`state_kind=etg` 表示原始 ETG/BKTree nid；`state_kind=ood` 表示当前状态未能可靠映射到原始 nid，"
+                "`state_ref` 使用 `ood:<candidate_nid>:<cluster>:<hash>:d<distance>` 作为稳定临时键。"
+            )
+            sort_col = st.selectbox(
+                "排序字段",
+                ["confidence", "mean_return", "visits", "ucb_score", "std_return"],
+                key="action_tuning_sort_col",
+            )
+            top_n = st.slider("显示 Top-N", 10, 500, 100, step=10, key="action_tuning_top_n")
+            st.dataframe(
+                df.sort_values(sort_col, ascending=False).head(top_n),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            high_conf = df[(df["visits"] >= 3) & (df["confidence"] >= 0.35)]
+            if not high_conf.empty:
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Scatter(
+                        x=high_conf["visits"],
+                        y=high_conf["mean_return"],
+                        mode="markers",
+                        marker=dict(
+                            size=8,
+                            color=high_conf["confidence"],
+                            colorscale="Viridis",
+                            showscale=True,
+                            colorbar=dict(title="confidence"),
+                        ),
+                        text=[
+                            f"state={r.state_ref}, action={r.action}, conf={r.confidence:.3f}"
+                            for r in high_conf.itertuples()
+                        ],
+                    )
+                )
+                fig.update_layout(
+                    title="高置信动作：访问次数 vs 平均回报",
+                    xaxis_title="visits",
+                    yaxis_title="mean_return",
+                    height=360,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    source_df = _collect_action_source_stats()
+    if source_df.empty:
+        st.info("暂无 episode action_source 统计。")
+        return
+
+    st.markdown("**动作来源占比趋势**")
+    fig = go.Figure()
+    for col, label in (
+        ("kg_plan_ratio", "kg_plan"),
+        ("kg_follow_ratio", "kg_follow"),
+        ("tuning_ratio", "tuning"),
+        ("mc_explore_ratio", "mc_explore"),
+        ("ood_ratio", "ood"),
+        ("ood_tuning_ratio", "ood_tuning"),
+        ("ood_mc_explore_ratio", "ood_mc_explore"),
+        ("fallback_ratio", "fallback"),
+    ):
+        if col in source_df:
+            fig.add_trace(
+                go.Scatter(
+                    x=source_df["trial"],
+                    y=source_df[col],
+                    mode="lines+markers",
+                    name=label,
+                )
+            )
+    fig.update_layout(
+        xaxis_title="trial",
+        yaxis_title="ratio",
+        yaxis_tickformat=".0%",
+        height=360,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if "guard_skip_update_ratio" in source_df or "guard_disable_ood_ratio" in source_df:
+        st.markdown("**RestartGuard 触发趋势**")
+        guard_fig = go.Figure()
+        for col, label in (
+            ("guard_skip_update_ratio", "skip model update"),
+            ("guard_disable_ood_ratio", "disable OOD explore"),
+        ):
+            if col in source_df:
+                guard_fig.add_trace(
+                    go.Scatter(
+                        x=source_df["trial"],
+                        y=source_df[col],
+                        mode="lines+markers",
+                        name=label,
+                    )
+                )
+        guard_fig.update_layout(
+            xaxis_title="trial",
+            yaxis_title="episode ratio",
+            yaxis_tickformat=".0%",
+            height=280,
+        )
+        st.plotly_chart(guard_fig, use_container_width=True)
+
+    st.markdown("**微调使用率与得分关系**")
+    if "nid_ood_ratio" in source_df:
+        st.markdown("**NID 解析质量趋势**")
+        nid_fig = go.Figure()
+        for col, label in (
+            ("nid_exact_ratio", "exact"),
+            ("nid_near_valid_ratio", "near_valid"),
+            ("nid_near_rejected_ratio", "near_rejected"),
+            ("nid_missing_ratio", "missing"),
+            ("nid_ood_ratio", "OOD total"),
+        ):
+            if col in source_df:
+                nid_fig.add_trace(
+                    go.Scatter(
+                        x=source_df["trial"],
+                        y=source_df[col],
+                        mode="lines+markers",
+                        name=label,
+                    )
+                )
+        nid_fig.update_layout(
+            xaxis_title="trial",
+            yaxis_title="ratio",
+            yaxis_tickformat=".0%",
+            height=320,
+        )
+        st.plotly_chart(nid_fig, use_container_width=True)
+
+    usage = (
+        source_df.get("tuning_ratio", 0)
+        + source_df.get("mc_explore_ratio", 0)
+        + source_df.get("ood_ratio", 0)
+        + source_df.get("ood_tuning_ratio", 0)
+        + source_df.get("ood_mc_explore_ratio", 0)
+    )
+    scatter = go.Figure()
+    scatter.add_trace(
+        go.Scatter(
+            x=usage,
+            y=source_df["avg_score"],
+            mode="markers+text",
+            text=source_df["trial"].astype(str),
+            textposition="top center",
+        )
+    )
+    scatter.update_layout(
+        xaxis_title="tuning + mc_explore ratio",
+        yaxis_title="avg_score",
+        height=340,
+    )
+    st.plotly_chart(scatter, use_container_width=True)
+
+    st.markdown("**高分 OOD 状态候选表**")
+    col_ood1, col_ood2 = st.columns([1, 1])
+    with col_ood1:
+        top_quantile = st.slider(
+            "高分 trial 范围",
+            min_value=0.05,
+            max_value=0.50,
+            value=0.25,
+            step=0.05,
+            format="Top %.2f",
+            key="high_score_ood_quantile",
+            help="只统计 objective 位于该 Top 比例内的 trial，用于寻找高收益但 BKTree 未覆盖的 OOD 状态。",
+        )
+    with col_ood2:
+        max_candidates = st.slider(
+            "候选数量",
+            min_value=20,
+            max_value=300,
+            value=100,
+            step=20,
+            key="high_score_ood_max_rows",
+        )
+    ood_candidates = _collect_high_score_ood_candidates(
+        top_quantile=float(top_quantile), max_rows=int(max_candidates)
+    )
+    if ood_candidates.empty:
+        st.info("暂无高分 OOD 候选。需要已完成 trial，且高分 trial 中存在 near_rejected/missing 状态。")
+    else:
+        st.caption(
+            "用于识别“高分但未被 BKTree/ETG 覆盖”的状态；phase_hint=promote_candidate 表示可优先考虑进入增量层候选。"
+        )
+        st.dataframe(
+            ood_candidates,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def _render_learner_tab():
     st.markdown("### 在线协同训练：Beam Search 参数寻优 + 微调模型进化")
 
@@ -2355,7 +3685,7 @@ def _render_learner_tab():
     _render_run_selector()
 
     summary = _load_summary()
-    study = _load_study()
+    study = _load_study(st.session_state.get("_active_run", ""))
     running_trial = _get_running_trial(study)
 
     if study:
@@ -2485,6 +3815,7 @@ def _render_learner_tab():
         "参数关系",
         "试验记录",
         "运行状态监测",
+        "动作微调效果",
         "训练记录与启动",
     ]
     _VIEW_KEY = "_learner_active_view"
@@ -2531,7 +3862,9 @@ def _render_learner_tab():
         st.divider()
         _plot_slice(study)
         with st.expander("参数等高线图", expanded=False):
-            importance = _compute_importance() or {}
+            importance = (
+                _compute_importance(st.session_state.get("_active_run", "")) or {}
+            )
             if importance:
                 top_params = sorted(importance.items(), key=lambda x: -x[1])[:6]
                 imp_txt = ", ".join(f"{k}={v:.1%}" for k, v in top_params)
@@ -2574,6 +3907,9 @@ def _render_learner_tab():
 
     elif active_view == "运行状态监测":
         _render_run_monitor()
+
+    elif active_view == "动作微调效果":
+        _render_action_tuning_tab()
 
     elif active_view == "训练记录与启动":
         _render_finetune_tab()

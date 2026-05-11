@@ -573,9 +573,9 @@ class BridgeServer:
                 dm_path = npy_dir / f"state_distance_matrix_{map_id}_{data_id}.npy"
                 if dm_path.exists():
                     try:
-                        self._dist_matrix = np.load(str(dm_path))
+                        self._dist_matrix = np.load(str(dm_path), mmap_mode="r")
                         logger.info(
-                            f"Loaded distance matrix from {dm_path} ({self._dist_matrix.shape})"
+                            f"Loaded distance matrix from {dm_path} ({self._dist_matrix.shape}, mmap)"
                         )
                     except Exception as e:
                         logger.warning(f"Failed to load distance matrix: {e}")
@@ -1315,6 +1315,16 @@ def create_app(bridge: GameBridge) -> FastAPI:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    @app.get("/game/override_stats")
+    async def get_override_stats():
+        model = getattr(_instance, "_override_model", None)
+        if model is None:
+            return {"loaded": False}
+        try:
+            return {"loaded": True, "summary": model.get_summary()}
+        except Exception as e:
+            return {"loaded": False, "error": str(e)}
 
     return app
 

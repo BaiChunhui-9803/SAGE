@@ -18,6 +18,7 @@ import sys
 import argparse
 import multiprocessing as mp
 from pathlib import Path
+import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -59,9 +60,115 @@ def _run_game_process(bridge, args):
         beam_params["backup_score_threshold"] = args.backup_score_threshold
     if args.backup_distance_threshold is not None:
         beam_params["backup_distance_threshold"] = args.backup_distance_threshold
+    if args.primary_threshold is not None:
+        beam_params["bktree_primary_threshold"] = args.primary_threshold
+    if args.secondary_threshold is not None:
+        beam_params["bktree_secondary_threshold"] = args.secondary_threshold
+    if args.enable_action_tuning:
+        beam_params["enable_action_tuning"] = True
+    if args.action_tuning_model_path:
+        beam_params["action_tuning_model_path"] = args.action_tuning_model_path
+    if args.tuning_explore_rate is not None:
+        beam_params["tuning_explore_rate"] = args.tuning_explore_rate
+    if args.tuning_min_confidence is not None:
+        beam_params["tuning_min_confidence"] = args.tuning_min_confidence
+    if args.tuning_min_advantage is not None:
+        beam_params["tuning_min_advantage"] = args.tuning_min_advantage
+    if args.tuning_ucb_c is not None:
+        beam_params["tuning_ucb_c"] = args.tuning_ucb_c
+    if args.tuning_target_visits is not None:
+        beam_params["tuning_target_visits"] = args.tuning_target_visits
+    if args.tuning_min_visits is not None:
+        beam_params["tuning_min_visits"] = args.tuning_min_visits
+    if args.tuning_credit_mode is not None:
+        beam_params["tuning_credit_mode"] = args.tuning_credit_mode
+    if args.tuning_discount_factor is not None:
+        beam_params["tuning_discount_factor"] = args.tuning_discount_factor
+    if args.tuning_outcome_bonus is not None:
+        beam_params["tuning_outcome_bonus"] = args.tuning_outcome_bonus
+    if args.tuning_confidence_return_scale is not None:
+        beam_params["tuning_confidence_return_scale"] = args.tuning_confidence_return_scale
+    if args.tuning_ood_key_mode is not None:
+        beam_params["tuning_ood_key_mode"] = args.tuning_ood_key_mode
+    if args.tuning_ood_distance_bucket is not None:
+        beam_params["tuning_ood_distance_bucket"] = args.tuning_ood_distance_bucket
+    if args.max_nid_fallback_dist is not None:
+        beam_params["max_nid_fallback_dist"] = args.max_nid_fallback_dist
+    if args.max_nid_fallback_hp_dist is not None:
+        beam_params["max_nid_fallback_hp_dist"] = args.max_nid_fallback_hp_dist
+    if args.tuning_force_explore:
+        beam_params["tuning_force_explore"] = True
+    if args.tuning_explore_ood is not None:
+        beam_params["tuning_explore_ood"] = bool(args.tuning_explore_ood)
+    restart_guard = {
+        "enabled": args.restart_guard_enabled,
+        "warmup_episodes": args.restart_warmup_episodes,
+        "max_ood_ratio": args.restart_guard_max_ood_ratio,
+        "max_ood_mc_ratio": args.restart_guard_max_ood_mc_ratio,
+        "max_episode_frames": args.restart_guard_max_episode_frames,
+        "allow_high_score_ood_update": args.restart_guard_allow_high_score_ood_update,
+        "high_score_ood_min_score": args.restart_guard_high_score_ood_min_score,
+        "skip_model_update": args.restart_guard_skip_model_update,
+        "skip_bad_results": args.restart_guard_skip_bad_results,
+        "disable_ood_explore_on_violation": args.restart_guard_disable_ood_explore,
+    }
+    if restart_guard.get("enabled"):
+        beam_params["restart_guard"] = restart_guard
+        beam_params["restart_warmup_episodes"] = restart_guard["warmup_episodes"]
+    incremental_layer = {
+        "enabled": args.enable_incremental_layer,
+        "update_bktree": args.incremental_update_bktree,
+        "update_etg_delta": args.incremental_update_etg_delta,
+        "use_delta_for_planning": args.incremental_use_delta_for_planning,
+        "persist_interval_episodes": args.incremental_persist_interval,
+        "min_new_state_distance": args.incremental_min_new_state_distance,
+        "delta_dir": args.incremental_delta_dir,
+    }
+    if args.incremental_layer_json:
+        try:
+            incremental_layer.update(json.loads(args.incremental_layer_json))
+        except Exception:
+            pass
+    if incremental_layer.get("enabled"):
+        beam_params["incremental_layer"] = incremental_layer
 
     agent_type = (
         "batch_replay" if args.autopilot_mode == "batch_replay" else "kg_guided"
+    )
+
+    cf_config = None
+    if args.cf_actions and args.cf_diverge_step is not None:
+        cf_config = {
+            "original_actions": args.cf_actions.split(","),
+            "diverge_step": args.cf_diverge_step,
+            "replacement_action": args.cf_replacement or "",
+            "cf_run_id": args.cf_run_id or "",
+            "cf_runs": args.cf_runs,
+        }
+
+    run_game(
+        map_key=args.map_key,
+        run_name=args.run_name,
+        bridge=bridge,
+        agent_type=agent_type,
+        fallback_action=args.fallback_action,
+        window_loc=window_loc,
+        data_dir=args.data_dir,
+        autopilot_mode=args.autopilot_mode,
+        beam_params=beam_params,
+        replay_actions=args.replay_actions.split(",") if args.replay_actions else None,
+        replay_runs=args.replay_runs,
+        kg_file=args.kg_file,
+        action_strategy=args.action_strategy,
+        batch_replay_count=args.replay_count,
+        batch_start=args.batch_start,
+        batch_end=args.batch_end,
+        primary_threshold=args.primary_threshold,
+        secondary_threshold=args.secondary_threshold,
+        max_episodes=args.max_episodes,
+        override_model_path=args.override_model_path,
+        cf_config=cf_config,
+        cf_runs=args.cf_runs,
     )
 
     run_game(
@@ -222,6 +329,82 @@ def main():
         default=None,
         help="Max episodes per run (overrides config default)",
     )
+    parser.add_argument(
+        "--override_model_path", default=None, help="Path to ActionOverrideModel pickle"
+    )
+    parser.add_argument(
+        "--cf_actions",
+        default=None,
+        help="Comma-separated actions for counterfactual replay phase",
+    )
+    parser.add_argument(
+        "--cf_diverge_step",
+        type=int,
+        default=None,
+        help="Step index to inject replacement action in counterfactual mode",
+    )
+    parser.add_argument(
+        "--cf_replacement",
+        default=None,
+        help="Replacement action code at divergence step",
+    )
+    parser.add_argument(
+        "--cf_run_id", default=None, help="Counterfactual run identifier"
+    )
+    parser.add_argument(
+        "--cf_runs",
+        type=int,
+        default=1,
+        help="Number of counterfactual episodes per divergence point",
+    )
+    parser.add_argument(
+        "--enable_action_tuning",
+        action="store_true",
+        help="Enable Monte Carlo action tuning router",
+    )
+    parser.add_argument(
+        "--action_tuning_model_path",
+        default=None,
+        help="Path to ActionTuningModel pickle",
+    )
+    parser.add_argument("--tuning_explore_rate", type=float, default=None)
+    parser.add_argument("--tuning_min_confidence", type=float, default=None)
+    parser.add_argument("--tuning_min_advantage", type=float, default=None)
+    parser.add_argument("--tuning_ucb_c", type=float, default=None)
+    parser.add_argument("--tuning_target_visits", type=int, default=None)
+    parser.add_argument("--tuning_min_visits", type=int, default=None)
+    parser.add_argument(
+        "--tuning_credit_mode",
+        choices=["every_visit", "first_visit"],
+        default=None,
+    )
+    parser.add_argument("--tuning_discount_factor", type=float, default=None)
+    parser.add_argument("--tuning_outcome_bonus", type=float, default=None)
+    parser.add_argument("--tuning_confidence_return_scale", type=float, default=None)
+    parser.add_argument("--tuning_ood_key_mode", choices=["aggregate", "exact"], default=None)
+    parser.add_argument("--tuning_ood_distance_bucket", type=float, default=None)
+    parser.add_argument("--tuning_force_explore", action="store_true")
+    parser.add_argument("--tuning_explore_ood", type=int, choices=[0, 1], default=None)
+    parser.add_argument("--max_nid_fallback_dist", type=float, default=None)
+    parser.add_argument("--max_nid_fallback_hp_dist", type=float, default=None)
+    parser.add_argument("--restart_guard_enabled", action="store_true")
+    parser.add_argument("--restart_warmup_episodes", type=int, default=10)
+    parser.add_argument("--restart_guard_max_ood_ratio", type=float, default=0.30)
+    parser.add_argument("--restart_guard_max_ood_mc_ratio", type=float, default=0.30)
+    parser.add_argument("--restart_guard_max_episode_frames", type=int, default=80)
+    parser.add_argument("--restart_guard_allow_high_score_ood_update", action="store_true")
+    parser.add_argument("--restart_guard_high_score_ood_min_score", type=float, default=24.0)
+    parser.add_argument("--restart_guard_skip_model_update", action="store_true")
+    parser.add_argument("--restart_guard_skip_bad_results", action="store_true")
+    parser.add_argument("--restart_guard_disable_ood_explore", action="store_true")
+    parser.add_argument("--enable_incremental_layer", action="store_true")
+    parser.add_argument("--incremental_update_bktree", action="store_true")
+    parser.add_argument("--incremental_update_etg_delta", action="store_true")
+    parser.add_argument("--incremental_use_delta_for_planning", action="store_true")
+    parser.add_argument("--incremental_delta_dir", default="output/incremental_layer")
+    parser.add_argument("--incremental_persist_interval", type=int, default=10)
+    parser.add_argument("--incremental_min_new_state_distance", type=float, default=1.0)
+    parser.add_argument("--incremental_layer_json", default=None)
     args = parser.parse_args()
 
     if args.mode in ("game", "all") and args.kg_file is None:
@@ -264,6 +447,15 @@ def main():
             game_proc.join(timeout=5)
             api_proc.join(timeout=5)
             print("All processes stopped.")
+        finally:
+            bridge.request_stop()
+            for proc in (game_proc, api_proc):
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
 
     elif args.mode == "game":
         from src.sc2env.bridge import GameBridge

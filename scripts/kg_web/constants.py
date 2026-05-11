@@ -40,3 +40,15 @@ _NEXT_STATE_MODE_LABELS = {
 }
 
 BRIDGE_API_URL = "http://localhost:8000"
+
+BKTREE_DEFAULT_THRESHOLDS = {
+    "default": {"primary_threshold": 1.0, "secondary_threshold": 0.5},
+    "MarineMicro_MvsM_4": {"primary_threshold": 0.7, "secondary_threshold": 0.5},
+}
+
+
+def get_bktree_threshold_defaults(map_id: str = "") -> dict:
+    defaults = dict(BKTREE_DEFAULT_THRESHOLDS["default"])
+    if map_id and map_id in BKTREE_DEFAULT_THRESHOLDS:
+        defaults.update(BKTREE_DEFAULT_THRESHOLDS[map_id])
+    return defaults

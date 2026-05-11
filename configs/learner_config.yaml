@@ -1,17 +1,145 @@
+action_override:
+  bad_episode_percentile: 25.0
+  cf_runs: 5
+  confidence_scale: 10.0
+  enabled: false
+  finetune_interval: 25
+  max_diverge_points_per_episode: 3
+  min_confidence: 0.5
+  recent_trials_for_analysis: 20
+action_tuning:
+  confidence_return_scale: 50.0
+  credit_mode: first_visit
+  discount_factor: 0.95
+  enabled: false
+  explore_rate: 0.05
+  max_nid_fallback_dist: 0.75
+  max_nid_fallback_hp_dist: 1.5
+  min_advantage: 1.0
+  min_confidence: 0.35
+  min_visits: 3
+  ood_distance_bucket: 0.5
+  ood_key_mode: aggregate
+  outcome_bonus: 50.0
+  restart_guard:
+    allow_high_score_ood_update: true
+    disable_ood_explore_on_violation: true
+    enabled: true
+    high_score_ood_min_score: 24.0
+    max_episode_frames: 80
+    max_ood_mc_ratio: 0.3
+    max_ood_ratio: 0.3
+    skip_bad_results: true
+    skip_model_update: true
+    warmup_episodes: 10
+  target_visits: 10
+  ucb_c: 1.4
+  validation_min_advantage: 5.0
+  validation_min_confidence: 0.35
+  validation_min_visits: 8
+bktree:
+  map_defaults:
+    MarineMicro_MvsM_4:
+      primary_threshold: 0.7
+      secondary_threshold: 0.5
+  primary_threshold: 0.7
+  secondary_threshold: 0.5
+execution:
+  completion_poll_interval: 5
+  completion_timeout_minutes: 60
+  episodes_per_trial: 100
+  max_trials: 200
+  restart_interval: 0
+  restart_on_phase_change: false
+  save_timeout_seconds: 30
+  startup_wait_seconds: 30
+  total_trials: 50
+game:
+  autopilot_mode: multi_step
+  data_dir: null
+  fallback_action: action_ATK_nearest_weakest
+  kg_file: null
+  map_key: sce-1
+incremental_layer:
+  delta_dir: incremental_layer
+  enabled: false
+  min_new_state_distance: 1.0
+  persist_interval_episodes: 10
+  update_bktree: false
+  update_etg_delta: false
+  use_delta_for_planning: false
+objective:
+  stability_alpha: 0.2
+  stability_cap: 8.0
+  stability_segments: 5
+phased_optimization:
+  cycle: true
+  default_phase: synergy
+  enabled: true
+  etg_target_objective: 35.0
+  exclude_exploration_from_optimization: true
+  exploration_min_rate: 0.2
+  exploration_target_avg_score: 10.0
+  mode: cycle
+  stages:
+  - max_trials: 20
+    min_trials: 10
+    name: etg_only
+    target_objective: 35.0
+    trials: 20
+  - max_trials: 20
+    min_trials: 10
+    name: exploration_only
+    target_avg_score: 10.0
+    trials: 20
+  - max_trials: 50
+    min_trials: 20
+    name: synergy
+    trials: 50
+  synergy_etg_first: true
+  synergy_etg_pool_size: 3
+  synergy_etg_protected_sources:
+  - kg_plan
+  - kg_follow
+  synergy_etg_selection: weighted
+  synergy_etg_weights:
+  - 0.6
+  - 0.25
+  - 0.15
+  synergy_explore_rate: 0.0
+  synergy_explore_sources: []
+  synergy_use_best_etg_params: true
+  synergy_validation_min_advantage: 0.0
+  synergy_validation_min_confidence: 0.1
+  synergy_validation_min_visits: 2
+  synergy_validation_profiles:
+    diverge:
+      min_advantage: 0.5
+      min_confidence: 0.15
+      min_visits: 3
+    fallback:
+      min_advantage: 0.0
+      min_confidence: 0.08
+      min_visits: 2
+    fuzzy_plan:
+      min_advantage: 0.5
+      min_confidence: 0.15
+      min_visits: 3
+    kg_relaxed:
+      min_advantage: 0.5
+      min_confidence: 0.15
+      min_visits: 3
+    ood:
+      min_advantage: 0.0
+      min_confidence: 0.08
+      min_visits: 2
+  synergy_validation_sources:
+  - ood
+  - fallback
+  - kg_relaxed
+  - fuzzy_plan
+  - diverge
 search_space:
-  mode:
-  - single_step
-  - multi_step
-  beam_width:
-  - 1
-  - 10
-  lookahead_steps:
-  - 1
-  - 15
-  score_mode:
-  - quality
-  - future_reward
-  - win_rate
   action_strategy:
   - best_beam
   - best_subtree_quality
@@ -19,15 +147,15 @@ search_space:
   - highest_transition_prob
   - random_beam
   - epsilon_greedy
-  min_visits:
+  backup_distance_threshold:
+  - 0.0
+  - 1.0
+  backup_score_threshold:
+  - 0.0
+  - 1.0
+  beam_width:
   - 1
   - 10
-  max_state_revisits:
-  - 1
-  - 5
-  min_cum_prob:
-  - 0.001
-  - 0.1
   discount_factor:
   - 0.5
   - 1.0
@@ -37,34 +165,28 @@ search_space:
   epsilon:
   - 0.01
   - 0.5
-  backup_score_threshold:
-  - 0.0
-  - 1.0
-  backup_distance_threshold:
-  - 0.0
-  - 1.0
+  lookahead_steps:
+  - 1
+  - 15
   masked_count:
   - 0
   - 3
-objective:
-  stability_alpha: 0.2
-  stability_cap: 8.0
-  stability_segments: 5
-execution:
-  episodes_per_trial: 100
-  total_trials: 50
-  max_trials: 200
-  startup_wait_seconds: 30
-  completion_poll_interval: 5
-  completion_timeout_minutes: 60
-  save_timeout_seconds: 30
-  restart_interval: 50
-game:
-  map_key: sce-1
-  kg_file: null
-  data_dir: null
-  autopilot_mode: multi_step
-  fallback_action: action_ATK_nearest_weakest
+  max_state_revisits:
+  - 1
+  - 5
+  min_cum_prob:
+  - 0.001
+  - 0.1
+  min_visits:
+  - 1
+  - 10
+  mode:
+  - single_step
+  - multi_step
+  score_mode:
+  - quality
+  - future_reward
+  - win_rate
 storage:
-  study_db: sqlite:///output/learner_results/study.db
   results_dir: output/learner_results
+  study_db: sqlite:///output/learner_results/study.db

@@ -372,6 +372,9 @@ def run_game(
     primary_threshold: float = 1.0,
     secondary_threshold: float = 0.5,
     max_episodes: Optional[int] = None,
+    override_model_path: Optional[str] = None,
+    cf_config: Optional[dict] = None,
+    cf_runs: int = 1,
 ):
     steps = _ENV_CONFIG["_MAX_STEP"]
     step_mul = _ENV_CONFIG["_STEP_MUL"]
@@ -520,9 +523,9 @@ def run_game(
                     try:
                         import numpy as _np
 
-                        _dist_matrix = _np.load(str(_dm_path))
+                        _dist_matrix = _np.load(str(_dm_path), mmap_mode="r")
                         print(
-                            f"Loaded dist matrix from {_dm_path} ({_dist_matrix.shape})"
+                            f"Loaded dist matrix from {_dm_path} ({_dist_matrix.shape}, mmap)"
                         )
                     except Exception as e:
                         print(f"Warning: Failed to load dist matrix: {e}")
@@ -542,6 +545,10 @@ def run_game(
             action_strategy=action_strategy,
             data_dir=data_dir,
             kg_file=kg_file,
+            override_model_path=override_model_path,
+            cf_config=cf_config,
+            bktree_primary_threshold=primary_threshold,
+            bktree_secondary_threshold=secondary_threshold,
         )
     else:
         agent1 = SmartAgent()
