@@ -175,7 +175,7 @@ def _states_match(
     if dist_matrix is not None:
         try:
             d = float(dist_matrix[actual, expected])
-            if not np.isnan(d) and d < threshold:
+            if np.isfinite(d) and not np.isnan(d) and d < threshold:
                 return True
         except (IndexError, TypeError, KeyError):
             pass
@@ -188,7 +188,7 @@ def _safe_dist(dm, shape, a: int, b: int) -> Optional[float]:
     try:
         if 0 <= a < shape[0] and 0 <= b < shape[1]:
             d = float(dm[a, b])
-            return None if np.isnan(d) else d
+            return None if (not np.isfinite(d) or np.isnan(d)) else d
     except (IndexError, TypeError):
         pass
     return None
@@ -581,6 +581,33 @@ class BridgeServer:
                         logger.warning(f"Failed to load distance matrix: {e}")
                 else:
                     logger.warning(f"Distance matrix not found: {dm_path}")
+                    sparse_candidates = [
+                        npy_dir / f"state_sparse_neighbors_{map_id}_{data_id}.pkl",
+                        path.parent / "sparse_neighbors.pkl",
+                        path.parent / "npy" / "sparse_neighbors.pkl",
+                    ]
+                    for sparse_path in sparse_candidates:
+                        if not sparse_path.exists():
+                            continue
+                        try:
+                            from src.decision.sparse_distance_index import (
+                                load_sparse_distance_index,
+                            )
+
+                            self._dist_matrix = load_sparse_distance_index(
+                                str(sparse_path)
+                            )
+                            logger.info(
+                                "Loaded sparse distance index from %s (%s states, top_k=%s)",
+                                sparse_path,
+                                len(self._dist_matrix.neighbors),
+                                self._dist_matrix.top_k,
+                            )
+                            break
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to load sparse distance index: {e}"
+                            )
 
         self._state_id_map = {}
         if data_dir:
@@ -613,7 +640,12 @@ class BridgeServer:
             self._load_known_states(data_dir)
 
         self._mds_coords = None
-        if self._dist_matrix is not None and map_id and data_id:
+        if (
+            self._dist_matrix is not None
+            and map_id
+            and data_id
+            and not getattr(self._dist_matrix, "is_sparse_distance_index", False)
+        ):
             try:
                 npy_dir = ROOT_DIR / "cache" / "npy"
                 npy_dir.mkdir(parents=True, exist_ok=True)

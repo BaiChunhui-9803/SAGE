@@ -25,10 +25,45 @@ from plotly.subplots import make_subplots
 import optuna
 
 from src import ROOT_DIR
-from kg_web.constants import get_bktree_threshold_defaults
+from kg_web.constants import get_bktree_threshold_defaults, get_map_key_for_map_id
 
 _RESULTS_DIR = ROOT_DIR / "output" / "learner_results"
 _TRAINING_RUNS_DIR = _RESULTS_DIR / "training_runs"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_bktree_summary(kg_data_dir: str) -> Dict[str, int]:
+    bkt_dir = ROOT_DIR / kg_data_dir / "bktree"
+    primary_file = bkt_dir / "primary_bktree.json"
+    primary_count = 0
+    if primary_file.exists():
+        try:
+            with open(str(primary_file), "r", encoding="utf-8") as f:
+                root = json.load(f)
+            stack = [root]
+            while stack:
+                node = stack.pop()
+                primary_count += 1
+                stack.extend(node.get("children", {}).values())
+        except Exception:
+            primary_count = 0
+
+    secondary_count = len(list(bkt_dir.glob("secondary_bktree_*.json")))
+
+    state_node_file = ROOT_DIR / kg_data_dir / "graph" / "state_node.txt"
+    state_node_count = 0
+    if state_node_file.exists():
+        try:
+            with open(str(state_node_file), "r", encoding="utf-8") as f:
+                state_node_count = sum(1 for line in f if line.strip())
+        except Exception:
+            state_node_count = 0
+
+    return {
+        "primary_count": primary_count,
+        "secondary_count": secondary_count,
+        "state_node_count": state_node_count,
+    }
 
 
 def _is_valid_action_code(action_code) -> bool:
@@ -527,9 +562,13 @@ def _start_learner():
         str(trials),
         "--episodes",
         str(episodes),
+        "--auto_archive",
     ]
     kg_file = st.session_state.get("_learner_kg_file", "")
     kg_data_dir = st.session_state.get("_learner_kg_data_dir", "")
+    kg_map_id = st.session_state.get("_learner_kg_map_id", "")
+    map_key = st.session_state.get("_learner_map_key") or get_map_key_for_map_id(kg_map_id)
+    cmd.extend(["--map_key", map_key])
     if kg_file:
         cmd.extend(["--kg_file", kg_file])
     if kg_data_dir:
@@ -558,6 +597,10 @@ def _start_learner():
             with open(str(cfg_path), "r", encoding="utf-8") as f:
                 cfg = _yaml.safe_load(f) or {}
         tuning_enabled = st.session_state.get("learner_use_action_tuning", False)
+        game_cfg = cfg.setdefault("game", {})
+        game_cfg["map_key"] = map_key
+        game_cfg["kg_file"] = kg_file or None
+        game_cfg["data_dir"] = kg_data_dir or None
         exec_cfg = cfg.setdefault("execution", {})
         exec_cfg["restart_interval"] = int(st.session_state.get("learner_restart_interval", 0))
         exec_cfg["restart_on_phase_change"] = bool(
@@ -804,6 +847,9 @@ def _start_rerun(trial_numbers):
     ]
     kg_file = st.session_state.get("_learner_kg_file", "")
     kg_data_dir = st.session_state.get("_learner_kg_data_dir", "")
+    kg_map_id = st.session_state.get("_learner_kg_map_id", "")
+    map_key = st.session_state.get("_learner_map_key") or get_map_key_for_map_id(kg_map_id)
+    cmd.extend(["--map_key", map_key])
     if kg_file:
         cmd.extend(["--kg_file", kg_file])
     if kg_data_dir:
@@ -1013,45 +1059,24 @@ def _render_learner_sidebar(kg_entry: Optional[Dict] = None):
     kg_name = kg_entry.get("name", "") if kg_entry else ""
     kg_data_dir = kg_entry.get("data_dir", "") if kg_entry else ""
     kg_map_id = kg_entry.get("map_id", "") if kg_entry else ""
+    kg_map_key = get_map_key_for_map_id(kg_map_id)
 
     st.session_state["_learner_kg_file"] = kg_file
     st.session_state["_learner_kg_data_dir"] = kg_data_dir
     st.session_state["_learner_kg_map_id"] = kg_map_id
+    st.session_state["_learner_map_key"] = kg_map_key
 
     if kg_file:
-        st.caption(f"KG: {kg_name}")
+        st.caption(f"ETG: {kg_name}")
+        st.caption(f"游戏场景: {kg_map_key} ({kg_map_id or '-'})")
         st.caption(f"路径: cache/knowledge_graph/{kg_file}")
         if kg_data_dir:
             st.caption(f"数据目录: {kg_data_dir}")
-            import json as _json
-            import glob as _glob
-
-            _bkt_dir = ROOT_DIR / kg_data_dir / "bktree"
-            _pri = _bkt_dir / "primary_bktree.json"
-            _pri_cnt = 0
-            if _pri.exists():
-                try:
-                    _d = _json.load(open(str(_pri), "r"))
-                    _stk = [_d]
-                    while _stk:
-                        _n = _stk.pop()
-                        _pri_cnt += 1
-                        _stk.extend(_n.get("children", {}).values())
-                except Exception:
-                    pass
-            _sec_files = sorted(_glob.glob(str(_bkt_dir / "secondary_bktree_*.json")))
-            _sec_cnt = len(_sec_files)
-            _sn_path = ROOT_DIR / kg_data_dir / "graph" / "state_node.txt"
-            _sn_cnt = 0
-            if _sn_path.exists():
-                try:
-                    _sn_cnt = sum(1 for _ in open(str(_sn_path), "r") if _.strip())
-                except Exception:
-                    pass
+            _bkt_summary = _get_bktree_summary(kg_data_dir)
             with st.expander("BKTree 详情", expanded=False):
-                st.caption(f"Primary 节点: {_pri_cnt}")
-                st.caption(f"Secondary 树: {_sec_cnt}")
-                st.caption(f"State 映射: {_sn_cnt} 条")
+                st.caption(f"Primary 节点: {_bkt_summary['primary_count']}")
+                st.caption(f"Secondary 树: {_bkt_summary['secondary_count']}")
+                st.caption(f"State 映射: {_bkt_summary['state_node_count']} 条")
 
     if "learner_proc" in st.session_state:
         proc = st.session_state.learner_proc
@@ -4320,6 +4345,11 @@ def _render_finetune_tab():
             ]
             _kg_file = st.session_state.get("_learner_kg_file", "")
             _kg_data_dir = st.session_state.get("_learner_kg_data_dir", "")
+            _kg_map_id = st.session_state.get("_learner_kg_map_id", "")
+            _map_key = st.session_state.get("_learner_map_key") or get_map_key_for_map_id(
+                _kg_map_id
+            )
+            cmd.extend(["--map_key", _map_key])
             if _kg_file:
                 cmd.extend(["--kg_file", _kg_file])
             if _kg_data_dir:

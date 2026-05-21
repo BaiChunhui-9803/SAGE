@@ -141,6 +141,7 @@ class FinetuneTrainer:
         self._sample_dir: Optional[Path] = None
         self._kg_file = config.get("kg_file")
         self._data_dir = config.get("data_dir")
+        self._map_key = config.get("map_key")
         self._reward_mode = config.get("reward_mode", "hp_episodic")
 
     def run(self):
@@ -374,6 +375,7 @@ class FinetuneTrainer:
 
         _kg_file = self._kg_file or game_cfg.get("kg_file")
         _data_dir = self._data_dir or game_cfg.get("data_dir")
+        _map_key = self._map_key or game_cfg.get("map_key", "sce-1")
         if not _kg_file or not _data_dir:
             print("=" * 60)
             print("[ERROR] ETG parameters required but not provided:")
@@ -401,7 +403,7 @@ class FinetuneTrainer:
             "--port",
             str(port),
             "--map_key",
-            game_cfg.get("map_key", "sce-1"),
+            _map_key,
             "--max_episodes",
             "0",
             "--autopilot_mode",
@@ -481,6 +483,7 @@ def main():
     )
     parser.add_argument("--kg_file", type=str, default=None, help="KG pickle file")
     parser.add_argument("--data_dir", type=str, default=None, help="Training data dir")
+    parser.add_argument("--map_key", type=str, default=None, help="Map config key")
     parser.add_argument(
         "--reward_mode",
         type=str,
@@ -497,6 +500,7 @@ def main():
         "target_visits": args.target_visits,
         "kg_file": args.kg_file,
         "data_dir": args.data_dir,
+        "map_key": args.map_key,
         "reward_mode": args.reward_mode,
     }
 

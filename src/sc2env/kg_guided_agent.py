@@ -251,10 +251,17 @@ class KGGuidedAgent(SmartAgent):
             self._load_bktree_from_data(initial_bktree_data)
             self._bktree_loaded = True
 
+        _dm_label = "None"
+        if self._dist_matrix is not None:
+            _dm_label = (
+                "sparse"
+                if getattr(self._dist_matrix, "is_sparse_distance_index", False)
+                else "loaded"
+            )
         print(
             f"[KGGuidedAgent] mode={self._mode}, state_id_map={len(self._state_id_map)}, "
             f"kg={'loaded' if self.kg else 'None'}, transitions={'loaded' if self.transitions else 'None'}, "
-            f"dist_matrix={'loaded' if self._dist_matrix is not None else 'None'}"
+            f"dist_matrix={_dm_label}"
         )
 
     def _load_bktree_from_data(self, data: dict) -> None:
@@ -1083,11 +1090,23 @@ class KGGuidedAgent(SmartAgent):
 
                 best_backup_state = None
                 best_backup_dist = float("inf")
+                if getattr(self._dist_matrix, "is_sparse_distance_index", False):
+                    backup_states = set(self._backup_continuations.keys())
+                    for bs, d in self._dist_matrix.get_neighbors(
+                        state_id, max_distance=backup_dist_threshold
+                    ):
+                        if bs in backup_states and d < best_backup_dist:
+                            best_backup_dist = float(d)
+                            best_backup_state = bs
                 for bs in self._backup_continuations:
+                    if best_backup_state is not None and getattr(
+                        self._dist_matrix, "is_sparse_distance_index", False
+                    ):
+                        break
                     if self._dist_matrix is not None and state_id != bs:
                         try:
                             d = float(self._dist_matrix[state_id, bs])
-                            if not np.isnan(d) and d < best_backup_dist:
+                            if np.isfinite(d) and not np.isnan(d) and d < best_backup_dist:
                                 best_backup_dist = d
                                 best_backup_state = bs
                         except (IndexError, TypeError):
@@ -1217,18 +1236,24 @@ class KGGuidedAgent(SmartAgent):
         if self._dist_matrix is not None and self.kg is not None:
             best_sid = None
             best_dist = float("inf")
-            for sid in self.kg.unique_states:
-                if sid == state_id:
-                    continue
-                try:
-                    d = float(self._dist_matrix[state_id, sid])
-                except (IndexError, TypeError, KeyError):
-                    continue
-                if np.isnan(d):
-                    continue
-                if d < best_dist:
-                    best_dist = d
-                    best_sid = sid
+            if getattr(self._dist_matrix, "is_sparse_distance_index", False):
+                for sid, d in self._dist_matrix.get_neighbors(state_id, max_distance=0.3):
+                    if sid in self.kg.unique_states and d < best_dist:
+                        best_dist = float(d)
+                        best_sid = sid
+            else:
+                for sid in self.kg.unique_states:
+                    if sid == state_id:
+                        continue
+                    try:
+                        d = float(self._dist_matrix[state_id, sid])
+                    except (IndexError, TypeError, KeyError):
+                        continue
+                    if not np.isfinite(d) or np.isnan(d):
+                        continue
+                    if d < best_dist:
+                        best_dist = d
+                        best_sid = sid
             if best_sid is not None and best_dist < 0.3:
                 fuzzy_actions = self.kg.get_top_k_actions(
                     state=best_sid, k=1, min_visits=1, metric="quality_score"

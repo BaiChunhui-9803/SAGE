@@ -46,9 +46,22 @@ BKTREE_DEFAULT_THRESHOLDS = {
     "MarineMicro_MvsM_4": {"primary_threshold": 0.7, "secondary_threshold": 0.5},
 }
 
+MAP_ID_TO_KEY = {
+    "MarineMicro_MvsM_4": "sce-1",
+    "MarineMicro_MvsM_4_mirror": "sce-1m",
+    "MarineMicro_MvsM_4_dist": "sce-2",
+    "MarineMicro_MvsM_4_dist_mirror": "sce-2m",
+    "MarineMicro_MvsM_8": "sce-3",
+    "MarineMicro_MvsM_8_mirror": "sce-3m",
+}
+
 
 def get_bktree_threshold_defaults(map_id: str = "") -> dict:
     defaults = dict(BKTREE_DEFAULT_THRESHOLDS["default"])
     if map_id and map_id in BKTREE_DEFAULT_THRESHOLDS:
         defaults.update(BKTREE_DEFAULT_THRESHOLDS[map_id])
     return defaults
+
+
+def get_map_key_for_map_id(map_id: str = "", default: str = "sce-1") -> str:
+    return MAP_ID_TO_KEY.get(map_id or "", default)

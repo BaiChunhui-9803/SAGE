@@ -69,10 +69,54 @@ def _load_config(path: str) -> dict:
     return cfg
 
 
-def _wait_for_server(port: int, timeout: int = 30) -> bool:
+def _tail_file(path: Path, max_lines: int = 80) -> str:
+    try:
+        with open(str(path), "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        return "".join(lines[-max_lines:]).strip()
+    except Exception as e:
+        return f"<failed to read log tail: {e}>"
+
+
+def _terminate_process_tree(proc: subprocess.Popen):
+    if proc is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        except Exception:
+            pass
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _wait_for_server(
+    port: int,
+    timeout: int = 120,
+    proc: subprocess.Popen = None,
+    log_path: Path = None,
+) -> bool:
     url = f"http://127.0.0.1:{port}/game/status"
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            print(
+                f"  [ERROR] server process exited before startup "
+                f"(returncode={proc.returncode})"
+            )
+            if log_path is not None:
+                print("  [ERROR] child log tail:")
+                print(_tail_file(log_path))
+            return False
         try:
             r = requests.get(url, timeout=3)
             if r.status_code == 200:
@@ -82,6 +126,44 @@ def _wait_for_server(port: int, timeout: int = 30) -> bool:
         except requests.RequestException:
             pass
         time.sleep(1)
+    if log_path is not None:
+        print(f"  [ERROR] server startup timeout after {timeout}s; child log tail:")
+        print(_tail_file(log_path))
+    return False
+
+
+def _wait_for_game_ready(
+    port: int,
+    timeout: int = 180,
+    proc: subprocess.Popen = None,
+    log_path: Path = None,
+) -> bool:
+    url = f"http://127.0.0.1:{port}/game/status"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            print(
+                f"  [ERROR] game process exited before ready "
+                f"(returncode={proc.returncode})"
+            )
+            if log_path is not None:
+                print("  [ERROR] child log tail:")
+                print(_tail_file(log_path))
+            return False
+        try:
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                status = r.json()
+                if status.get("running") is True:
+                    return True
+        except requests.RequestException:
+            pass
+        except ValueError:
+            pass
+        time.sleep(1)
+    if log_path is not None:
+        print(f"  [ERROR] game startup timeout after {timeout}s; child log tail:")
+        print(_tail_file(log_path))
     return False
 
 
@@ -815,6 +897,8 @@ class ParameterLearner:
             cmd.extend(["--kg_file", game["kg_file"]])
         if game.get("data_dir"):
             cmd.extend(["--data_dir", game["data_dir"]])
+        if not bool(game.get("api_load_kg", False)):
+            cmd.append("--skip_api_kg")
         if game.get("fallback_action"):
             cmd.extend(["--fallback_action", game["fallback_action"]])
         bktree_cfg = self.cfg.get("bktree", {}) or {}
@@ -919,10 +1003,24 @@ class ParameterLearner:
         )
 
         print(f"  SC2 process started (PID={self._current_proc.pid}, port={port})")
-        startup_wait = self.cfg["execution"].get("startup_wait_seconds", 30)
-        if not _wait_for_server(port, timeout=startup_wait):
-            self._current_proc.terminate()
+        startup_wait = self.cfg["execution"].get("startup_wait_seconds", 120)
+        if not _wait_for_server(
+            port,
+            timeout=startup_wait,
+            proc=self._current_proc,
+            log_path=log_path,
+        ):
+            _terminate_process_tree(self._current_proc)
             raise RuntimeError("server startup timeout")
+        game_ready_wait = self.cfg["execution"].get("game_ready_wait_seconds", 180)
+        if game_ready_wait and not _wait_for_game_ready(
+            port,
+            timeout=game_ready_wait,
+            proc=self._current_proc,
+            log_path=log_path,
+        ):
+            _terminate_process_tree(self._current_proc)
+            raise RuntimeError("game startup timeout")
 
     def _load_kg(self):
         game = self.cfg.get("game", {})
@@ -994,21 +1092,13 @@ class ParameterLearner:
             except Exception:
                 pass
         if self._current_proc and self._current_proc.poll() is None:
-            self._current_proc.terminate()
-            try:
-                self._current_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._current_proc.kill()
+            _terminate_process_tree(self._current_proc)
             print("  SC2 process stopped")
 
     def _signal_handler(self, sig, frame):
         print("\nstopping...")
         if self._current_proc and self._current_proc.poll() is None:
-            self._current_proc.terminate()
-            try:
-                self._current_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._current_proc.kill()
+            _terminate_process_tree(self._current_proc)
         raise KeyboardInterrupt
 
     def _objective(self, trial: optuna.Trial, study: optuna.Study) -> float:
@@ -1462,6 +1552,7 @@ def main():
     parser.add_argument("--config", default=str(_DEFAULT_CONFIG), help="config path")
     parser.add_argument("--trials", type=int, default=None, help="total trials")
     parser.add_argument("--episodes", type=int, default=None, help="episodes per trial")
+    parser.add_argument("--map_key", default=None, help="Map config key")
     parser.add_argument("--kg_file", default=None, help="KG pickle file")
     parser.add_argument("--data_dir", default=None, help="data dir")
     parser.add_argument("--resume", action="store_true", help="resume from last")
@@ -1508,6 +1599,21 @@ def main():
         action="store_true",
         help="Enable Monte Carlo action tuning during parameter search",
     )
+    parser.add_argument(
+        "--auto_archive",
+        action="store_true",
+        help="Archive completed run into output/learner_results/all_data with manifest",
+    )
+    parser.add_argument(
+        "--archive_root",
+        default=str(ROOT_DIR / "output" / "learner_results" / "all_data"),
+        help="Archive root for --auto_archive",
+    )
+    parser.add_argument(
+        "--archive_overwrite",
+        action="store_true",
+        help="Overwrite existing archive destination when --auto_archive is enabled",
+    )
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
@@ -1516,10 +1622,12 @@ def main():
         cfg["execution"]["total_trials"] = args.trials
     if args.episodes is not None:
         cfg["execution"]["episodes_per_trial"] = args.episodes
+    if args.map_key is not None:
+        cfg.setdefault("game", {})["map_key"] = args.map_key
     if args.kg_file is not None:
-        cfg["game"]["kg_file"] = args.kg_file
+        cfg.setdefault("game", {})["kg_file"] = args.kg_file
     if args.data_dir is not None:
-        cfg["game"]["data_dir"] = args.data_dir
+        cfg.setdefault("game", {})["data_dir"] = args.data_dir
     if args.restart_interval is not None:
         cfg["execution"]["restart_interval"] = args.restart_interval
     if args.restart_on_phase_change:
@@ -1539,6 +1647,15 @@ def main():
         ]
     else:
         cfg["_fixed_masked_actions"] = []
+
+    if args.run_dir:
+        run_dir_path = Path(args.run_dir)
+        run_dir_path.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(str(run_dir_path / "learner_config_snapshot.yaml"), "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+        except Exception as e:
+            print(f"  [WARN] failed to save config snapshot: {e}")
 
     print("=" * 60)
     print("PredictionRTS Parameter Learner (single-start mode)")
@@ -1573,6 +1690,19 @@ def main():
             learner._rerun(args.rerun, n_times=1)
         else:
             learner.run(n_trials=cfg["execution"]["total_trials"], resume=args.resume)
+        if args.auto_archive and args.run_dir and args.rerun is None:
+            try:
+                from scripts.archive_learner_run import archive_run
+
+                dest = archive_run(
+                    Path(args.run_dir),
+                    archive_root=Path(args.archive_root),
+                    overwrite=bool(args.archive_overwrite),
+                    cfg=cfg,
+                )
+                print(f"archived run: {dest}")
+            except Exception as e:
+                print(f"  [WARN] auto archive failed: {e}")
     finally:
         pid_file.unlink(missing_ok=True)
 

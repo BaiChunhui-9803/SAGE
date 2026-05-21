@@ -48,17 +48,19 @@ execution:
   completion_poll_interval: 5
   completion_timeout_minutes: 60
   episodes_per_trial: 100
+  game_ready_wait_seconds: 240
   max_trials: 200
   restart_interval: 0
-  restart_on_phase_change: false
+  restart_on_phase_change: true
   save_timeout_seconds: 30
-  startup_wait_seconds: 30
+  startup_wait_seconds: 120
   total_trials: 50
 game:
+  api_load_kg: false
   autopilot_mode: multi_step
-  data_dir: null
+  data_dir: data/MarineMicro_MvsM_4/augmented_1
   fallback_action: action_ATK_nearest_weakest
-  kg_file: null
+  kg_file: MarineMicro_MvsM_4_augmented/kg_simple.pkl
   map_key: sce-1
 incremental_layer:
   delta_dir: incremental_layer
@@ -75,27 +77,27 @@ objective:
 phased_optimization:
   cycle: true
   default_phase: synergy
-  enabled: true
+  enabled: false
   etg_target_objective: 35.0
   exclude_exploration_from_optimization: true
   exploration_min_rate: 0.2
   exploration_target_avg_score: 10.0
   mode: cycle
   stages:
-  - max_trials: 20
-    min_trials: 10
-    name: etg_only
-    target_objective: 35.0
-    trials: 20
-  - max_trials: 20
-    min_trials: 10
-    name: exploration_only
-    target_avg_score: 10.0
-    trials: 20
   - max_trials: 50
     min_trials: 20
-    name: synergy
+    name: etg_only
+    target_objective: 35.0
     trials: 50
+  - max_trials: 50
+    min_trials: 20
+    name: exploration_only
+    target_avg_score: 10.0
+    trials: 50
+  - max_trials: 100
+    min_trials: 50
+    name: synergy
+    trials: 100
   synergy_etg_first: true
   synergy_etg_pool_size: 3
   synergy_etg_protected_sources:

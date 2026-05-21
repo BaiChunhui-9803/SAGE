@@ -27,6 +27,7 @@ from kg_web.raw_data_tab import _render_raw_data_tab
 from kg_web.live_game_tab import _render_live_game_sidebar, _render_live_game_content
 from kg_web.results_tab import _render_results_tab
 from kg_web.learner_tab import _render_learner_tab, _render_learner_sidebar
+from kg_web.experiment_compare_tab import _render_experiment_compare_tab
 
 
 def main():
@@ -48,8 +49,9 @@ def main():
         "实时对局",
         "结果分析",
         "参数寻优",
+        "批量实验",
     ]
-    _TAB_ICONS = ["📋", "🕸️", "🔮", "🎮", "📊", "⚡", "📈", "🧪"]
+    _TAB_ICONS = ["📋", "🕸️", "🔮", "🎮", "📊", "⚡", "📈", "🧪", "🗂️"]
 
     with st.sidebar:
         _sel = st.segmented_control(
@@ -70,7 +72,12 @@ def main():
         transitions = {}
         kg_obj = None
 
-        if active_tab > 0:
+        tabs_requiring_kg_entry = {1, 2, 3, 4, 5, 7}
+        tabs_requiring_kg_data = {1, 2, 3}
+        requires_kg_entry = active_tab in tabs_requiring_kg_entry
+        requires_kg_data = active_tab in tabs_requiring_kg_data
+
+        if requires_kg_entry:
             st.divider()
 
             catalog = load_kg_catalog()
@@ -99,14 +106,15 @@ def main():
                 f"data_id: {kg_entry.get('data_id', '-')}"
             )
 
-            kg_data, quality_min, quality_max = load_kg(kg_entry["file"])
-            transitions = load_transitions(kg_entry.get("transitions", ""))
-            kg_obj = load_kg_object(kg_entry["file"])
+            if requires_kg_data:
+                kg_data, quality_min, quality_max = load_kg(kg_entry["file"])
+                transitions = load_transitions(kg_entry.get("transitions", ""))
+                kg_obj = load_kg_object(kg_entry["file"])
 
-            if "quality_low" not in st.session_state:
-                st.session_state.quality_low = quality_min
-            if "quality_high" not in st.session_state:
-                st.session_state.quality_high = quality_max
+                if "quality_low" not in st.session_state:
+                    st.session_state.quality_low = quality_min
+                if "quality_high" not in st.session_state:
+                    st.session_state.quality_high = quality_max
 
             st.divider()
 
@@ -114,7 +122,7 @@ def main():
         tab_just_switched = _prev_tab != active_tab
         st.session_state._prev_tab = active_tab
 
-        if active_tab > 0 and not tab_just_switched:
+        if requires_kg_entry and not tab_just_switched:
             if active_tab == 1:
                 focus_enabled = st.checkbox(
                     "🎯 聚焦模式",
@@ -530,6 +538,9 @@ def main():
 
     elif active_tab == 7:
         _render_learner_tab()
+
+    elif active_tab == 8:
+        _render_experiment_compare_tab()
 
 
 if __name__ == "__main__":

@@ -59,7 +59,17 @@ def match_beam_paths(
     Returns:
         {beam_id: [MatchResult, ...]} sorted by combined_score descending.
     """
-    if distance_matrix is not None:
+    if distance_matrix is not None and getattr(
+        distance_matrix, "is_sparse_distance_index", False
+    ):
+        all_distances = [
+            d
+            for entries in distance_matrix.neighbors.values()
+            for _sid, d in entries
+            if np.isfinite(d)
+        ]
+        max_dist = max(all_distances) if all_distances else 1.0
+    elif distance_matrix is not None:
         max_dist = float(np.max(distance_matrix))
         if max_dist < 1e-9:
             max_dist = 1.0
@@ -108,7 +118,8 @@ def match_beam_paths(
                             si < distance_matrix.shape[0]
                             and qi < distance_matrix.shape[1]
                         ):
-                            total_dist += distance_matrix[si][qi]
+                            d = float(distance_matrix[si][qi])
+                            total_dist += d if np.isfinite(d) else max_dist
                         else:
                             total_dist += max_dist
                     avg_dist = total_dist / L

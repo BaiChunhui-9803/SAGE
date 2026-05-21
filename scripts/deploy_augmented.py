@@ -12,6 +12,7 @@ Copies:
   1. BKTree JSON  -> datas/data_for_transit/bktree_augmented/
   2. state_node   -> datas/data_for_transit/graph/state_node_augmented.txt
   3. dist_matrix  -> cache/npy/state_distance_matrix_{map_id}_{data_id}.npy
+  4. sparse index -> cache/npy/state_sparse_neighbors_{map_id}_{data_id}.pkl
 """
 
 import sys
@@ -68,6 +69,20 @@ def deploy_dist_matrix(kg_dir: Path, dest_path: Path):
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_path)
     logger.info(f"  state_distance_matrix.npy -> {dest_path}")
+
+
+def deploy_sparse_neighbors(kg_dir: Path, dest_path: Path):
+    candidates = [
+        kg_dir / "sparse_neighbors.pkl",
+        kg_dir / "npy" / "sparse_neighbors.pkl",
+    ]
+    src = next((p for p in candidates if p.exists()), None)
+    if src is None:
+        logger.warning(f"  sparse_neighbors.pkl not found in {kg_dir}")
+        return
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest_path)
+    logger.info(f"  sparse_neighbors.pkl -> {dest_path}")
 
 
 def deploy_data_dir(collected_dir: Path, kg_dir: Path, map_id: str, data_id: str):
@@ -131,6 +146,12 @@ def main():
         / "npy"
         / f"state_distance_matrix_{args.map_id}_{args.data_id}.npy"
     )
+    sparse_neighbors_dest = (
+        BASE_DIR
+        / "cache"
+        / "npy"
+        / f"state_sparse_neighbors_{args.map_id}_{args.data_id}.pkl"
+    )
 
     logger.info("=" * 50)
     logger.info("DEPLOY AUGMENTED ETG")
@@ -143,6 +164,7 @@ def main():
         logger.info(f"  BKTree dest   : {bktree_dest}")
         logger.info(f"  State node    : {state_node_dest}")
         logger.info(f"  Dist matrix   : {dist_matrix_dest}")
+        logger.info(f"  Sparse index  : {sparse_neighbors_dest}")
         logger.info(f"  Data dir      : data/{args.map_id}/{args.data_id}/")
         return
 
@@ -154,6 +176,9 @@ def main():
 
     logger.info("Deploying distance matrix...")
     deploy_dist_matrix(kg_dir, dist_matrix_dest)
+
+    logger.info("Deploying sparse neighbor index...")
+    deploy_sparse_neighbors(kg_dir, sparse_neighbors_dest)
 
     logger.info("Deploying data_dir structure...")
     deploy_data_dir(collected_dir, kg_dir, args.map_id, args.data_id)

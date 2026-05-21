@@ -22,7 +22,7 @@ def load_kg_catalog() -> List[Dict]:
     return catalog.get("knowledge_graphs", [])
 
 
-@st.cache_data
+@st.cache_resource
 def load_kg(kg_file: str) -> Tuple[Dict, float, float]:
     path = KG_DIR / kg_file
 
@@ -46,7 +46,7 @@ def load_kg(kg_file: str) -> Tuple[Dict, float, float]:
     return kg_data, quality_min, quality_max
 
 
-@st.cache_data
+@st.cache_resource
 def load_transitions(transitions_file: str) -> Dict:
     path = KG_DIR / transitions_file
     if not path.exists():

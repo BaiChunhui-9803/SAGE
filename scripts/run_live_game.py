@@ -171,38 +171,18 @@ def _run_game_process(bridge, args):
         cf_runs=args.cf_runs,
     )
 
-    run_game(
-        map_key=args.map_key,
-        run_name=args.run_name,
-        bridge=bridge,
-        agent_type=agent_type,
-        fallback_action=args.fallback_action,
-        window_loc=window_loc,
-        data_dir=args.data_dir,
-        autopilot_mode=args.autopilot_mode,
-        beam_params=beam_params,
-        replay_actions=args.replay_actions.split(",") if args.replay_actions else None,
-        replay_runs=args.replay_runs,
-        kg_file=args.kg_file,
-        action_strategy=args.action_strategy,
-        batch_replay_count=args.replay_count,
-        batch_start=args.batch_start,
-        batch_end=args.batch_end,
-        primary_threshold=args.primary_threshold,
-        secondary_threshold=args.secondary_threshold,
-        max_episodes=args.max_episodes,
-    )
-
 
 def _run_api_process(bridge, args):
     from src.sc2env.bridge_server import run_server
 
+    kg_file = None if args.skip_api_kg else args.kg_file
+    data_dir = None if args.skip_api_kg else args.data_dir
     run_server(
         bridge,
         host=args.host,
         port=args.port,
-        kg_file=args.kg_file,
-        data_dir=args.data_dir,
+        kg_file=kg_file,
+        data_dir=data_dir,
     )
 
 
@@ -233,6 +213,11 @@ def main():
     )
     parser.add_argument("--host", default="0.0.0.0", help="API server host")
     parser.add_argument("--port", type=int, default=8000, help="API server port")
+    parser.add_argument(
+        "--skip_api_kg",
+        action="store_true",
+        help="Do not preload KG in the API process; the game agent still loads it.",
+    )
     parser.add_argument(
         "--window_x", type=int, default=None, help="SC2 window X position"
     )

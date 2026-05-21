@@ -278,8 +278,8 @@ def find_closest_switch_point(
         best_dist = distance_threshold
         for sp in switching_points:
             try:
-                d = dist_matrix[actual_state, sp.predicted_state]
-                if np.isnan(d):
+                d = float(dist_matrix[actual_state, sp.predicted_state])
+                if not np.isfinite(d) or np.isnan(d):
                     continue
                 if d < best_dist:
                     best_dist = d

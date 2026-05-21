@@ -117,7 +117,7 @@ class FinetuneModel:
                 d = float(dist_matrix[state_id, sid])
             except (IndexError, TypeError, KeyError):
                 continue
-            if np.isnan(d):
+            if not np.isfinite(d) or np.isnan(d):
                 continue
             w = np.exp(-d / self.sigma)
             if w < 1e-8:

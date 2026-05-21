@@ -1,6 +1,7 @@
 import time
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from absl import flags, app
@@ -23,7 +24,37 @@ os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 flags.DEFINE_string(
     "run_name", None, "Name for this run. Defaults to map_key_YYYYMMDD_HHMMSS"
 )
+flags.DEFINE_string("map_key", "sce-1", "Map config key")
 FLAGS = flags.FLAGS
+
+
+def _apply_map_config(map_key: str):
+    global _MAP_CONFIG, _MAP, _ENV_CONFIG, _ALG_CONFIG, _PATH_CONFIG
+    _MAP_CONFIG, _MAP, _ENV_CONFIG, _ALG_CONFIG, _PATH_CONFIG = get_map_config(map_key)
+
+    agent_module = sys.modules.get("src.sc2env.agent")
+    if agent_module is not None:
+        agent_module._MAP_CONFIG = _MAP_CONFIG
+        agent_module._MAP = _MAP
+        agent_module._ENV_CONFIG = _ENV_CONFIG
+        agent_module._ALG_CONFIG = _ALG_CONFIG
+        agent_module._PATH_CONFIG = _PATH_CONFIG
+
+    kg_agent_module = sys.modules.get("src.sc2env.kg_guided_agent")
+    if kg_agent_module is not None:
+        kg_agent_module._MAP_CONFIG = _MAP_CONFIG
+        kg_agent_module._MAP = _MAP
+        kg_agent_module._ENV_CONFIG = _ENV_CONFIG
+        kg_agent_module._ALG_CONFIG = _ALG_CONFIG
+        kg_agent_module._PATH_CONFIG = _PATH_CONFIG
+
+    replay_module = sys.modules.get("src.sc2env.replay_collector")
+    if replay_module is not None:
+        replay_module._MAP_CONFIG = _MAP_CONFIG
+        replay_module._MAP = _MAP
+        replay_module._ENV_CONFIG = _ENV_CONFIG
+        replay_module._ALG_CONFIG = _ALG_CONFIG
+        replay_module._PATH_CONFIG = _PATH_CONFIG
 
 
 def kill_all_units(env, obs):
@@ -376,12 +407,15 @@ def run_game(
     cf_config: Optional[dict] = None,
     cf_runs: int = 1,
 ):
+    _apply_map_config(map_key)
     steps = _ENV_CONFIG["_MAX_STEP"]
     step_mul = _ENV_CONFIG["_STEP_MUL"]
 
     agent1 = None
     if agent_type == "batch_replay":
         from src.sc2env.replay_collector import ReplayCollector
+
+        _apply_map_config(map_key)
 
         action_log_path = ""
         if data_dir:
@@ -399,12 +433,34 @@ def run_game(
     elif agent_type == "kg_guided" and bridge is not None:
         from src.sc2env.kg_guided_agent import KGGuidedAgent
 
+        _apply_map_config(map_key)
+
         bktree_data = None
-        primary_bktree_path = _PATH_CONFIG.get("_GAME_PRIMARY_BKTREE_PATH", "")
-        aug_primary_path = _PATH_CONFIG.get("_GAME_AUGMENTED_BKTREE_PATH", "")
-        if not (primary_bktree_path and os.path.exists(primary_bktree_path)):
-            if aug_primary_path and os.path.exists(aug_primary_path):
-                primary_bktree_path = aug_primary_path
+        data_bktree_dir = None
+        if data_dir:
+            data_bktree_dir = Path(data_dir) / "bktree"
+            if not data_bktree_dir.exists():
+                from src import ROOT_DIR
+
+                data_bktree_dir = ROOT_DIR / data_dir / "bktree"
+
+        primary_bktree_path = ""
+        secondary_prefix = ""
+        if data_bktree_dir and data_bktree_dir.exists():
+            data_primary = data_bktree_dir / "primary_bktree.json"
+            if data_primary.exists():
+                primary_bktree_path = str(data_primary)
+                secondary_prefix = str(data_bktree_dir / "secondary_bktree")
+
+        if not primary_bktree_path:
+            primary_bktree_path = _PATH_CONFIG.get("_GAME_PRIMARY_BKTREE_PATH", "")
+            aug_primary_path = _PATH_CONFIG.get("_GAME_AUGMENTED_BKTREE_PATH", "")
+            if not (primary_bktree_path and os.path.exists(primary_bktree_path)):
+                if aug_primary_path and os.path.exists(aug_primary_path):
+                    primary_bktree_path = aug_primary_path
+                    secondary_prefix = _PATH_CONFIG.get(
+                        "_GAME_AUGMENTED_SECONDARY_PREFIX", ""
+                    )
         if primary_bktree_path and os.path.exists(primary_bktree_path):
             try:
                 import json
@@ -412,7 +468,9 @@ def run_game(
                 bktree_data = {"primary": None, "secondary": {}}
                 with open(primary_bktree_path, "r") as f:
                     bktree_data["primary"] = json.load(f)
-                prefix = _PATH_CONFIG.get("_GAME_SECONDARY_BKTREE_PREFIX", "")
+                prefix = secondary_prefix or _PATH_CONFIG.get(
+                    "_GAME_SECONDARY_BKTREE_PREFIX", ""
+                )
                 aug_prefix = _PATH_CONFIG.get("_GAME_AUGMENTED_SECONDARY_PREFIX", "")
                 if not (prefix and os.path.exists(f"{prefix}_1.json")):
                     prefix = aug_prefix
@@ -426,7 +484,10 @@ def run_game(
                                 bktree_data["secondary"][cid_str] = json.load(sf)
                         except Exception:
                             pass
-                print(f"[run_game] Loaded BKTree from {primary_bktree_path}")
+                print(
+                    f"[run_game] Loaded BKTree from {primary_bktree_path} "
+                    f"(secondary_prefix={prefix or '-'})"
+                )
             except Exception as e:
                 print(f"Warning: Failed to load BKTree data: {e}")
 
@@ -514,11 +575,6 @@ def run_game(
                 _map_id, _data_id = _dp.parts[-2], _dp.parts[-1]
                 _npy_dir = _ROOT / "cache" / "npy"
                 _dm_path = _npy_dir / f"state_distance_matrix_{_map_id}_{_data_id}.npy"
-                if not _dm_path.exists():
-                    _dm_path = (
-                        _npy_dir
-                        / "state_distance_matrix_MarineMicro_MvsM_4_augmented_1.npy"
-                    )
                 if _dm_path.exists():
                     try:
                         import numpy as _np
@@ -529,6 +585,35 @@ def run_game(
                         )
                     except Exception as e:
                         print(f"Warning: Failed to load dist matrix: {e}")
+                else:
+                    print(f"Warning: Distance matrix not found for data_dir={data_dir}: {_dm_path}")
+                    _sparse_candidates = [
+                        _npy_dir
+                        / f"state_sparse_neighbors_{_map_id}_{_data_id}.pkl",
+                    ]
+                    if _kg_file:
+                        _sparse_candidates.extend(
+                            [
+                                Path(_kg_file).parent / "sparse_neighbors.pkl",
+                                Path(_kg_file).parent / "npy" / "sparse_neighbors.pkl",
+                            ]
+                        )
+                    for _sp_path in _sparse_candidates:
+                        if not _sp_path.exists():
+                            continue
+                        try:
+                            from src.decision.sparse_distance_index import (
+                                load_sparse_distance_index,
+                            )
+
+                            _dist_matrix = load_sparse_distance_index(str(_sp_path))
+                            print(
+                                f"Loaded sparse distance index from {_sp_path} "
+                                f"({len(_dist_matrix.neighbors)} states, top_k={_dist_matrix.top_k})"
+                            )
+                            break
+                        except Exception as e:
+                            print(f"Warning: Failed to load sparse distance index: {e}")
 
         agent1 = KGGuidedAgent(
             bridge=bridge,
@@ -599,7 +684,7 @@ def run_game(
 
 
 def main(unused_argv):
-    map_key = "sce-1"
+    map_key = FLAGS.map_key
     run_name = FLAGS.run_name
     if not run_name:
         run_name = f"{map_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

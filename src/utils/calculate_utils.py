@@ -92,6 +92,71 @@ def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees)
     return distance_matrix
 
 
+def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees):
+    """
+    Robust distance-matrix calculation for collected augmented datasets.
+    Missing secondary BKTree nodes are assigned a large fallback distance so the
+    optional matrix build does not abort after the ETG has already been built.
+    """
+    num_clusters = len(reverse_dict)
+    distance_matrix = np.zeros((num_clusters, num_clusters))
+    clusters = list(reverse_dict.values())
+    fallback_distance = 1e6
+
+    resolved_nodes = []
+    missing_clusters = []
+    for cluster in clusters:
+        state = cluster["cluster"]
+        tree = secondary_bk_trees.get(state[0])
+        node = tree.find_node_by_cluster_id(state[1]) if tree is not None else None
+        if node is None:
+            resolved_nodes.append(None)
+            missing_clusters.append(state)
+        else:
+            resolved_nodes.append(node.state)
+
+    if missing_clusters:
+        logger.warning(
+            "Missing %s state clusters in secondary BKTrees; using fallback distance for affected pairs. Sample: %s",
+            len(missing_clusters),
+            missing_clusters[:10],
+        )
+
+    last_output_time = time.time()
+    progress_threshold = 0.01
+
+    logger.info(f"Starting distance matrix calculation for {num_clusters} clusters...")
+
+    for i in range(num_clusters):
+        for j in range(i + 1, num_clusters):
+            node1 = resolved_nodes[i]
+            node2 = resolved_nodes[j]
+
+            if node1 is None or node2 is None:
+                distance_matrix[i, j] = fallback_distance
+                distance_matrix[j, i] = fallback_distance
+                continue
+
+            dist = custom_distance.multi_distance(node1, node2)
+            euclidean_distance = math.sqrt(dist[0] ** 2 + dist[1] ** 2)
+
+            distance_matrix[i, j] = euclidean_distance
+            distance_matrix[j, i] = euclidean_distance
+
+        progress = (i + 1) / num_clusters
+        if progress >= progress_threshold or i == num_clusters - 1:
+            current_time = time.time()
+            time_elapsed = current_time - last_output_time
+            logger.info(
+                f"Progress: {progress * 100:.1f}% | Processed: {i + 1}/{num_clusters} | Step Time: {time_elapsed:.2f}s"
+            )
+            last_output_time = current_time
+            progress_threshold += 0.01
+
+    logger.info("Distance matrix calculation completed.")
+    return distance_matrix
+
+
 def calculate_and_save_distance_matrix(
     reverse_dict, custom_distance, secondary_bk_trees, distance_matrix_folder
 ):

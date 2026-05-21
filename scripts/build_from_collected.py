@@ -317,8 +317,20 @@ def compute_distance_matrix(
     bktree_dir: str,
     output_dir: Path,
     node_to_state: Dict[int, Tuple[int, int]],
-):
+    max_states: int = 30000,
+) -> bool:
     logger.info("Computing state distance matrix...")
+    num_states = len(node_to_state)
+    if max_states > 0 and num_states > max_states:
+        estimated_gib = (num_states * num_states * 8) / (1024**3)
+        logger.warning(
+            "  Skipping distance matrix: %s states would require about %.1f GiB "
+            "for a dense float64 matrix. Increase --max-distance-matrix-states "
+            "or set it to 0 only if enough memory is available.",
+            num_states,
+            estimated_gib,
+        )
+        return False
 
     reverse_dict: Dict[int, Dict] = {}
     for nid, (p, s) in node_to_state.items():
@@ -326,6 +338,30 @@ def compute_distance_matrix(
 
     custom_distance = CustomDistance(threshold=0.5)
 
+    secondary_bktrees = load_secondary_bktrees(bktree_dir, custom_distance)
+    logger.info(f"  Loaded {len(secondary_bktrees)} secondary BKTrees")
+
+    npy_dir = output_dir / "npy"
+    npy_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from src.utils.calculate_utils import calculate_and_save_distance_matrix
+
+        dist_matrix = calculate_and_save_distance_matrix(
+            reverse_dict, custom_distance, secondary_bktrees, str(npy_dir)
+        )
+        logger.info(
+            f"  Distance matrix computed: {dist_matrix.shape if dist_matrix is not None else 'N/A'}"
+        )
+        return dist_matrix is not None
+    except Exception as e:
+        logger.error(f"  Failed to compute distance matrix: {e}")
+        return False
+
+
+def load_secondary_bktrees(
+    bktree_dir: str, custom_distance: CustomDistance
+) -> Dict[int, BKTree]:
     secondary_bktrees: Dict[int, BKTree] = {}
     bktree_path = Path(bktree_dir)
     for f in bktree_path.glob("secondary_bktree_*.json"):
@@ -356,23 +392,163 @@ def compute_distance_matrix(
             secondary_bktrees[cid] = tree
         except Exception as e:
             logger.warning(f"  Failed to load {f}: {e}")
+    return secondary_bktrees
 
+
+def collect_state_visits(kg: DecisionKnowledgeGraph) -> Dict[int, int]:
+    visits: Dict[int, int] = {}
+    for state_id, actions in kg.state_action_map.items():
+        if not isinstance(state_id, (int, np.integer)):
+            continue
+        visits[int(state_id)] = sum(int(stats.visits) for stats in actions.values())
+    return visits
+
+
+def resolve_cluster_states(
+    node_to_state: Dict[int, Tuple[int, int]],
+    secondary_bktrees: Dict[int, BKTree],
+) -> Dict[int, Any]:
+    resolved: Dict[int, Any] = {}
+    missing = []
+    for nid, (primary_id, secondary_id) in node_to_state.items():
+        tree = secondary_bktrees.get(primary_id)
+        node = tree.find_node_by_cluster_id(secondary_id) if tree is not None else None
+        if node is None:
+            missing.append((nid, primary_id, secondary_id))
+            continue
+        resolved[nid] = node.state
+    if missing:
+        logger.warning(
+            "  Sparse index skipped %s missing BKTree nodes. Sample: %s",
+            len(missing),
+            missing[:10],
+        )
+    return resolved
+
+
+def compute_sparse_neighbor_index(
+    bktree_dir: str,
+    output_dir: Path,
+    node_to_state: Dict[int, Tuple[int, int]],
+    state_visits: Dict[int, int],
+    top_k: int = 32,
+    max_source_states: int = 30000,
+    max_candidates_per_primary: int = 512,
+) -> bool:
+    logger.info("Computing sparse state-neighbor index...")
+    if top_k <= 0:
+        logger.info("  Skipping sparse neighbors: top_k <= 0")
+        return False
+
+    custom_distance = CustomDistance(threshold=0.5)
+    secondary_bktrees = load_secondary_bktrees(bktree_dir, custom_distance)
     logger.info(f"  Loaded {len(secondary_bktrees)} secondary BKTrees")
 
-    npy_dir = output_dir / "npy"
-    npy_dir.mkdir(parents=True, exist_ok=True)
+    resolved_states = resolve_cluster_states(node_to_state, secondary_bktrees)
+    if not resolved_states:
+        logger.warning("  No resolved cluster states; sparse neighbor index not built.")
+        return False
+
+    primary_groups: Dict[int, List[int]] = defaultdict(list)
+    for nid, (primary_id, _secondary_id) in node_to_state.items():
+        if nid in resolved_states:
+            primary_groups[int(primary_id)].append(int(nid))
+
+    ranked_sources = sorted(
+        resolved_states.keys(),
+        key=lambda sid: (state_visits.get(sid, 0), -sid),
+        reverse=True,
+    )
+    if max_source_states > 0:
+        ranked_sources = ranked_sources[:max_source_states]
+    source_set = set(ranked_sources)
+
+    candidate_groups: Dict[int, List[int]] = {}
+    for primary_id, nids in primary_groups.items():
+        ranked = sorted(
+            nids,
+            key=lambda sid: (state_visits.get(sid, 0), -sid),
+            reverse=True,
+        )
+        if max_candidates_per_primary > 0 and len(ranked) > max_candidates_per_primary:
+            ranked = ranked[:max_candidates_per_primary]
+        candidate_groups[primary_id] = ranked
+
+    neighbors: Dict[int, List[Tuple[int, float]]] = {}
+    processed = 0
+    for source_id in ranked_sources:
+        primary_id = int(node_to_state[source_id][0])
+        candidates = list(candidate_groups.get(primary_id, []))
+        if source_id not in candidates:
+            candidates.append(source_id)
+
+        source_state = resolved_states.get(source_id)
+        if source_state is None:
+            continue
+
+        scored: List[Tuple[int, float]] = []
+        for candidate_id in candidates:
+            if candidate_id == source_id:
+                continue
+            candidate_state = resolved_states.get(candidate_id)
+            if candidate_state is None:
+                continue
+            try:
+                dist = custom_distance.multi_distance(source_state, candidate_state)
+                d = float((dist[0] ** 2 + dist[1] ** 2) ** 0.5)
+            except Exception:
+                continue
+            scored.append((candidate_id, d))
+        scored.sort(key=lambda item: item[1])
+        neighbors[source_id] = scored[:top_k]
+        processed += 1
+        if processed % 5000 == 0:
+            logger.info("  Sparse neighbors processed: %s/%s", processed, len(ranked_sources))
+
+    for source_id, entries in list(neighbors.items()):
+        for target_id, dist in entries:
+            if target_id not in source_set:
+                continue
+            reverse_entries = neighbors.setdefault(target_id, [])
+            if all(nid != source_id for nid, _ in reverse_entries):
+                reverse_entries.append((source_id, dist))
+
+    for source_id, entries in list(neighbors.items()):
+        entries.sort(key=lambda item: item[1])
+        neighbors[source_id] = entries[:top_k]
 
     try:
-        from src.utils.calculate_utils import calculate_and_save_distance_matrix
+        from src.decision.sparse_distance_index import SparseDistanceIndex
 
-        dist_matrix = calculate_and_save_distance_matrix(
-            reverse_dict, custom_distance, secondary_bktrees, str(npy_dir)
+        index = SparseDistanceIndex(
+            neighbors=neighbors,
+            num_states=max(node_to_state.keys()) + 1 if node_to_state else 0,
+            top_k=top_k,
+            metadata={
+                "source": "build_from_collected",
+                "num_total_states": len(node_to_state),
+                "num_resolved_states": len(resolved_states),
+                "num_indexed_states": len(neighbors),
+                "max_source_states": max_source_states,
+                "max_candidates_per_primary": max_candidates_per_primary,
+                "grouping": "same_primary_cluster",
+                "ranking": "state_visit_frequency",
+            },
         )
+        out_path = output_dir / "sparse_neighbors.pkl"
+        index.save(str(out_path))
+        npy_path = output_dir / "npy" / "sparse_neighbors.pkl"
+        index.save(str(npy_path))
         logger.info(
-            f"  Distance matrix computed: {dist_matrix.shape if dist_matrix is not None else 'N/A'}"
+            "  Sparse neighbor index saved: %s (%s states, top_k=%s)",
+            out_path,
+            len(neighbors),
+            top_k,
         )
+        return True
     except Exception as e:
-        logger.error(f"  Failed to compute distance matrix: {e}")
+        logger.error(f"  Failed to save sparse neighbor index: {e}")
+        return False
 
 
 def validate_knowledge_graph(kg: DecisionKnowledgeGraph):
@@ -432,6 +608,43 @@ def main():
         action="store_true",
         help="Validate KG after building",
     )
+    parser.add_argument(
+        "--skip-distance-matrix",
+        action="store_true",
+        help="Skip dense state distance matrix generation.",
+    )
+    parser.add_argument(
+        "--max-distance-matrix-states",
+        type=int,
+        default=30000,
+        help=(
+            "Automatically skip dense distance matrix generation when unique states "
+            "exceed this value. Set to 0 to disable the guard."
+        ),
+    )
+    parser.add_argument(
+        "--skip-sparse-neighbors",
+        action="store_true",
+        help="Do not build sparse top-K state-neighbor index when dense matrix is skipped or fails.",
+    )
+    parser.add_argument(
+        "--sparse-top-k",
+        type=int,
+        default=32,
+        help="Number of nearest neighbors saved for each indexed state.",
+    )
+    parser.add_argument(
+        "--sparse-max-source-states",
+        type=int,
+        default=30000,
+        help="Maximum number of states indexed by sparse neighbors; ranked by ETG visit frequency. Set 0 for all.",
+    )
+    parser.add_argument(
+        "--sparse-max-candidates-per-primary",
+        type=int,
+        default=512,
+        help="Maximum same-primary-cluster candidates considered per source state. Set 0 for all.",
+    )
     args = parser.parse_args()
 
     data = load_collected_data(args.input)
@@ -460,6 +673,8 @@ def main():
         build_episodes_arrays(episodes, state_to_node)
     )
 
+    kg = None
+    transitions = None
     for context_window in args.context_windows:
         transitions = build_transitions(
             state_episodes=state_episodes,
@@ -480,7 +695,27 @@ def main():
         if args.validate:
             validate_knowledge_graph(kg)
 
-    compute_distance_matrix(args.bktree_dir, output_dir, node_to_state)
+    if args.skip_distance_matrix:
+        logger.info("Skipping state distance matrix (--skip-distance-matrix).")
+        dense_ready = False
+    else:
+        dense_ready = compute_distance_matrix(
+            args.bktree_dir,
+            output_dir,
+            node_to_state,
+            max_states=args.max_distance_matrix_states,
+        )
+
+    if not dense_ready and not args.skip_sparse_neighbors and kg is not None:
+        compute_sparse_neighbor_index(
+            args.bktree_dir,
+            output_dir,
+            node_to_state,
+            collect_state_visits(kg),
+            top_k=args.sparse_top_k,
+            max_source_states=args.sparse_max_source_states,
+            max_candidates_per_primary=args.sparse_max_candidates_per_primary,
+        )
 
     logger.info("=" * 60)
     logger.info("BUILD COMPLETE")

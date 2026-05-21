@@ -14,6 +14,7 @@ from kg_web.constants import (
     BRIDGE_API_URL,
     _ACTION_STRATEGY_LABELS,
     get_bktree_threshold_defaults,
+    get_map_key_for_map_id,
 )
 from kg_web.loaders import load_episode_data
 from kg_web.live_game_html import _build_live_game_html
@@ -100,6 +101,8 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
     )
 
     map_id = kg_entry.get("map_id", "") if kg_entry else ""
+    map_key = get_map_key_for_map_id(map_id)
+    st.caption(f"游戏场景: {map_key} ({map_id or '-'})")
     data_id = kg_entry.get("data_id", "") if kg_entry else ""
     ep_data = None
     if map_id and data_id:
@@ -328,6 +331,8 @@ def _render_live_game_sidebar(kg_entry: Optional[Dict] = None):
             "all",
             "--port",
             str(port),
+            "--map_key",
+            map_key,
         ]
         if kg_file:
             cmd.extend(["--kg_file", kg_file])
