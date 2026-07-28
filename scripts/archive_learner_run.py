@@ -151,6 +151,11 @@ def _scenario_prefix(map_key: str, map_id: str) -> str:
     return compact or "scenario"
 
 
+def _safe_id_part(value: str) -> str:
+    safe = re.sub(r"[^0-9a-zA-Z_-]+", "_", str(value or "")).strip("_")
+    return safe or "run"
+
+
 def _unique_destination(base_dir: Path, source_run: str, overwrite: bool = False) -> Path:
     if overwrite or not base_dir.exists():
         return base_dir
@@ -199,7 +204,12 @@ def build_manifest(
 
     group, suffix, experiment_type, method = _detect_method_group(cfg, log_cfg)
     scenario = _scenario_prefix(map_key, map_id)
+    source_run = run_dir.name if run_dir.name.startswith("run_") else ""
+    if not source_run and log_cfg.get("run_dir"):
+        source_run = Path(str(log_cfg["run_dir"])).name
     exp_id = experiment_id or f"{scenario}_{suffix}"
+    if source_run and experiment_id is None:
+        exp_id = f"{exp_id}_{_safe_id_part(source_run)}"
     data_type = str(catalog_entry.get("type") or "")
     data_id = str(catalog_entry.get("data_id") or "")
     replay_expansion = (
@@ -215,10 +225,6 @@ def build_manifest(
         primary_threshold = 0.7 if map_id and "MvsM_4" in map_id else 1.0
     if secondary_threshold is None:
         secondary_threshold = 0.5
-
-    source_run = run_dir.name if run_dir.name.startswith("run_") else ""
-    if not source_run and log_cfg.get("run_dir"):
-        source_run = Path(str(log_cfg["run_dir"])).name
 
     bktree_path = str(Path(data_dir) / "bktree") if data_dir else ""
     bktree_path = bktree_path.replace("\\", "/")

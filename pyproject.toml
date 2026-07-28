@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "prediction-rts"
+name = "sage-rts"
 version = "0.1.0"
-description = "RTS Agent Behavior Prediction and Decision Making"
+description = "Switch-aware graph planning with gated exploration for RTS micromanagement"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
-    {name = "PredictionRTS Team"}
+    {name = "SAGE contributors"}
 ]
 keywords = ["reinforcement-learning", "transformer", "starcraft2", "rts", "decision-transformer"]
 classifiers = [
@@ -65,9 +65,9 @@ web = [
 ]
 
 [project.scripts]
-predict-rtstrain = "scripts.run_train:main"
-predict-rts-evaluate = "scripts.run_evaluate:main"
-predict-rts-predict = "scripts.run_predict:main"
+sage-train = "scripts.run_train:main"
+sage-evaluate = "scripts.run_evaluate:main"
+sage-predict = "scripts.run_predict:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

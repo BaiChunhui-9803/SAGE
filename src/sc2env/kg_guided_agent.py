@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import os
 import random
+import copy
 import hashlib
 import json
+import math
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -127,6 +130,8 @@ class KGGuidedAgent(SmartAgent):
         self._pending_cluster: Optional[str] = None
         self._bktree_loaded = False
         self._state_id_map = state_id_map or {}
+        self._base_state_id_map = dict(self._state_id_map)
+        self._base_bktree_data = copy.deepcopy(initial_bktree_data)
         self._nid_to_ps: Dict[int, Tuple[int, int]] = {
             v: k for k, v in self._state_id_map.items()
         }
@@ -156,11 +161,22 @@ class KGGuidedAgent(SmartAgent):
         self._replay_per_ep: int = len(self._replay_actions)
         self._replay_frame_count: int = 0
         self._replay_runs_remaining: int = max(1, replay_runs) if replay_actions else 0
+        self._replay_forced_final_score: Optional[float] = None
+        self._replay_exhaustion_mode: str = str(
+            self._beam_params.get("replay_exhaustion_mode", "pause")
+        )
 
         self._action_plan: List[str] = []
         self._planned_states: List[int] = []
         self._plan_idx: int = 0
         self._last_plan_snap: Optional[Dict] = None
+        self._plan_counter: int = 0
+        self._active_plan_id: Optional[str] = None
+        self._last_switch_event: Optional[Dict[str, Any]] = None
+        self._last_no_switch_shadow: Optional[Dict[str, Any]] = None
+        self._last_plan_switch_candidates: List[Dict[str, Any]] = []
+        self._last_path_follow_event: Optional[Dict[str, Any]] = None
+        self._last_planning_timing: Dict[str, Any] = {}
         self._all_beam_states: Set[int] = set()
         self._backup_continuations: Dict[int, Tuple[List[str], List[int]]] = {}
 
@@ -204,9 +220,33 @@ class KGGuidedAgent(SmartAgent):
             "guard_ood_disabled": 0,
             "total": 0,
         }
+        self._trial_log_counters: Dict[str, int] = {
+            key: 0 for key in self._log_counters
+        }
 
-        self._local_result_dir: Optional[str] = None
+        self._local_result_dir: Optional[str] = self._beam_params.get("local_result_dir")
         self._local_completed: int = 0
+        if "trial_number" in self._beam_params:
+            self._flush_trial_number = self._beam_params.get("trial_number")
+        self._eval_bktree_enabled = False
+        self._eval_bktree_dir: Optional[str] = None
+        self._eval_bktree_source_copied = False
+        self._eval_primary_bktree = None
+        self._eval_secondary_bktree: Dict[int, Any] = {}
+        self._eval_state_id_map: Dict[Tuple[int, int], int] = {}
+        self._eval_next_state_id: int = 0
+        self._eval_new_state_count: int = 0
+        self._eval_bktree_wait_for_new_game: bool = False
+        self._eval_bktree_id_mode = str(
+            self._beam_params.get("eval_bktree_id_mode", "local_compact")
+        ).lower()
+        self._eval_bktree_source_mode = str(
+            self._beam_params.get("eval_bktree_source_mode", "fresh")
+        ).lower()
+        self._eval_bktree_normalization = str(
+            self._beam_params.get("eval_bktree_normalization", "pymarl_compatible")
+        ).lower()
+        self._configure_eval_bktree(reset=True)
 
         self._plan_log_file = None
 
@@ -302,6 +342,360 @@ class KGGuidedAgent(SmartAgent):
                         tree.next_cluster_id = max_id + 1
                     self.secondary_bktree[int(cluster_id)] = tree
 
+    def _deserialize_bktree_data(self, data: Optional[dict]):
+        from src.structure.BKTree_sc2 import ClusterNode, BKTree, get_max_cluster_id
+
+        def deserialize_node(node_data):
+            if node_data is None:
+                return None
+            node = ClusterNode(node_data["state"], int(node_data["cluster_id"]))
+            for dist_key, child_data in node_data.get("children", {}).items():
+                try:
+                    dist_val = int(dist_key)
+                except (TypeError, ValueError):
+                    dist_val = float(dist_key)
+                child_node = deserialize_node(child_data)
+                if child_node is not None:
+                    node.children[dist_val] = child_node
+            return node
+
+        primary = BKTree(self.custom_distance_manager.multi_distance, distance_index=0)
+        secondary: Dict[int, Any] = {}
+        if not data:
+            return primary, secondary
+        primary_root = deserialize_node(data.get("primary"))
+        if primary_root is not None:
+            primary.root = primary_root
+            max_id = get_max_cluster_id(primary)
+            if max_id >= primary.next_cluster_id:
+                primary.next_cluster_id = max_id + 1
+        for cluster_id, sec_data in (data.get("secondary") or {}).items():
+            sec_root = deserialize_node(sec_data)
+            if sec_root is None:
+                continue
+            tree = BKTree(self.custom_distance_manager.multi_distance, distance_index=1)
+            tree.root = sec_root
+            max_id = get_max_cluster_id(tree)
+            if max_id >= tree.next_cluster_id:
+                tree.next_cluster_id = max_id + 1
+            secondary[int(cluster_id)] = tree
+        return primary, secondary
+
+    @staticmethod
+    def _serialize_bktree_node(node):
+        if node is None:
+            return None
+        return {
+            "state": node.state,
+            "cluster_id": node.cluster_id,
+            "children": {
+                str(dist): KGGuidedAgent._serialize_bktree_node(child)
+                for dist, child in node.children.items()
+            },
+        }
+
+    def _eval_bktree_requested(self) -> bool:
+        mode = str(self._beam_params.get("eval_bktree_mode", "") or "").lower()
+        return mode in {"mutable_copy", "mutable", "copy"} or bool(
+            self._beam_params.get("enable_eval_bktree", False)
+        )
+
+    def _current_bktree_thresholds(self) -> Tuple[float, float]:
+        return (
+            float(self._beam_params.get("bktree_primary_threshold", self._bktree_primary_threshold)),
+            float(self._beam_params.get("bktree_secondary_threshold", self._bktree_secondary_threshold)),
+        )
+
+    def _configure_eval_bktree(self, reset: bool = False) -> None:
+        self._eval_bktree_enabled = self._eval_bktree_requested() and bool(
+            self._local_result_dir
+        )
+        if not self._eval_bktree_enabled:
+            return
+        from pathlib import Path as _Path
+        import shutil as _shutil
+
+        result_dir = _Path(self._local_result_dir)
+        self._eval_bktree_dir = str(result_dir / "bktree")
+        if reset or self._eval_primary_bktree is None:
+            bktree_dir = _Path(self._eval_bktree_dir)
+            if reset and bktree_dir.exists():
+                _shutil.rmtree(str(bktree_dir))
+            if self._eval_bktree_source_mode in {"copy", "mutable_copy", "source_copy", "source"}:
+                self._eval_primary_bktree, self._eval_secondary_bktree = (
+                    self._deserialize_bktree_data(copy.deepcopy(self._base_bktree_data))
+                )
+            else:
+                from src.structure.BKTree_sc2 import BKTree
+
+                self._eval_primary_bktree = BKTree(
+                    self.custom_distance_manager.multi_distance,
+                    distance_index=0,
+                )
+                self._eval_secondary_bktree = {}
+            if self._eval_bktree_id_mode in {"source", "source_state_node", "legacy"}:
+                self._eval_state_id_map = dict(self._base_state_id_map)
+                self._eval_next_state_id = (
+                    max(self._eval_state_id_map.values()) + 1
+                    if self._eval_state_id_map
+                    else 0
+                )
+            else:
+                self._eval_state_id_map = {}
+                self._eval_next_state_id = 0
+            self._eval_new_state_count = 0
+            self._eval_bktree_source_copied = False
+            self._prepare_eval_bktree_dir()
+
+    def _prepare_eval_bktree_dir(self) -> None:
+        if not self._eval_bktree_enabled or not self._eval_bktree_dir:
+            return
+        from pathlib import Path as _Path
+        import shutil as _shutil
+        import json as _json
+
+        bktree_dir = _Path(self._eval_bktree_dir)
+        bktree_dir.mkdir(parents=True, exist_ok=True)
+        if (
+            not self._eval_bktree_source_copied
+            and self._eval_bktree_source_mode in {"copy", "mutable_copy", "source_copy", "source"}
+        ):
+            data_dir = self._data_dir or self._beam_params.get("data_dir")
+            source_dir = _Path(data_dir) / "bktree" if data_dir else None
+            if source_dir is not None and source_dir.exists():
+                _shutil.copytree(str(source_dir), str(bktree_dir), dirs_exist_ok=True)
+            self._eval_bktree_source_copied = True
+        config = {
+            "mode": "fresh_eval" if self._eval_bktree_source_mode not in {"copy", "mutable_copy", "source_copy", "source"} else "mutable_copy",
+            "source_mode": self._eval_bktree_source_mode,
+            "source_data_dir": self._data_dir or self._beam_params.get("data_dir"),
+            "primary_threshold": self._current_bktree_thresholds()[0],
+            "secondary_threshold": self._current_bktree_thresholds()[1],
+            "normalization": self._eval_bktree_normalization,
+            "normalization_detail": (
+                "PyMARL/OnPolicy compatible for current archives: x/64 - 1, 1 - y/64, hp/45"
+                if self._eval_bktree_normalization in {"pymarl_compatible", "pymarl", "onpolicy"}
+                else "decision normalization: x/(map_resolution/2)-1, 1-y/(map_resolution/2), hp/45"
+            ),
+            "decision_normalization": "x/(map_resolution/2)-1, 1-y/(map_resolution/2), hp/45",
+            "record_only_normalization": True,
+            "state_id_mode": self._eval_bktree_id_mode,
+            "state_id_source": (
+                "eval-local compact ids assigned to visited clusters"
+                if self._eval_bktree_id_mode not in {"source", "source_state_node", "legacy"}
+                else "original state_node plus eval inserted clusters"
+            ),
+            "initial_spawn_mode": (
+                "debug_spawn"
+                if bool(self._beam_params.get("force_initial_debug_spawn", False))
+                else (
+                    "map_reset"
+                    if bool(self._beam_params.get("reset_between_episodes", False))
+                    else (
+                        "manual_kill_spawn"
+                        if bool(self._beam_params.get("validate_manual_spawn", False))
+                        else "cached_debug_spawn"
+                    )
+                )
+            ),
+            "spawn_validation": (
+                "strict_count_hp"
+                if bool(self._beam_params.get("force_initial_debug_spawn", False))
+                or bool(self._beam_params.get("reset_between_episodes", False))
+                or bool(self._beam_params.get("validate_manual_spawn", False))
+                else "not_enabled"
+            ),
+            "debug_observation_snapshot": True,
+            "debug_observation_fields": [
+                "game_loop",
+                "unit tags",
+                "unit positions",
+                "health/shield/energy",
+                "weapon cooldown",
+                "raw orders",
+                "state_norm",
+            ],
+        }
+        with open(str(bktree_dir / "bktree_config.json"), "w", encoding="utf-8") as f:
+            _json.dump(config, f, ensure_ascii=False, indent=2)
+
+    def _eval_state_id_for_cluster(self, cluster: Tuple[int, int]) -> int:
+        if cluster not in self._eval_state_id_map:
+            self._eval_state_id_map[cluster] = self._eval_next_state_id
+            self._eval_next_state_id += 1
+            self._eval_new_state_count += 1
+        return self._eval_state_id_map[cluster]
+
+    def _resolve_eval_bktree_state_id(self, state_norm) -> Tuple[Optional[int], Optional[Tuple[int, int]], str]:
+        if not self._eval_bktree_enabled or state_norm is None:
+            return None, None, "disabled"
+        if self._eval_bktree_wait_for_new_game:
+            return None, None, "waiting_new_game"
+        self._configure_eval_bktree(reset=False)
+        from src.structure.BKTree_sc2 import BKTree, ClusterNode, classify_new_state
+
+        primary_threshold, secondary_threshold = self._current_bktree_thresholds()
+        if self._eval_primary_bktree is None:
+            self._eval_primary_bktree = BKTree(
+                self.custom_distance_manager.multi_distance,
+                distance_index=0,
+            )
+        if self._eval_primary_bktree.root is None:
+            self._eval_primary_bktree.root = ClusterNode(dict(state_norm), 1)
+            sec = BKTree(self.custom_distance_manager.multi_distance, distance_index=1)
+            sec.root = ClusterNode(dict(state_norm), 1)
+            sec.next_cluster_id = 2
+            self._eval_secondary_bktree[1] = sec
+            state_id = self._eval_state_id_for_cluster((1, 1))
+            return state_id, (1, 1), "eval_bktree"
+        p_id = int(
+            classify_new_state(
+                dict(state_norm),
+                self._eval_primary_bktree,
+                threshold=primary_threshold,
+            )
+        )
+        sec = self._eval_secondary_bktree.get(p_id)
+        if sec is None:
+            sec = BKTree(self.custom_distance_manager.multi_distance, distance_index=1)
+            sec.root = ClusterNode(dict(state_norm), 1)
+            sec.next_cluster_id = 2
+            self._eval_secondary_bktree[p_id] = sec
+            s_id = 1
+        elif sec.root is None:
+            sec.root = ClusterNode(dict(state_norm), 1)
+            sec.next_cluster_id = 2
+            s_id = 1
+        else:
+            s_id = int(
+                classify_new_state(
+                    dict(state_norm),
+                    sec,
+                    threshold=secondary_threshold,
+                )
+            )
+        state_id = self._eval_state_id_for_cluster((p_id, s_id))
+        return state_id, (p_id, s_id), "eval_bktree"
+
+    def _eval_bktree_norm_unit(self, unit) -> Tuple[float, float, float]:
+        mode = self._eval_bktree_normalization
+        health_norm = max(float(getattr(unit, "health", 0.0)), 0.0) / 45.0
+        if mode in {"decision", "live", "predictionrts"}:
+            map_resolution = _ENV_CONFIG["_MAP_RESOLUTION"]
+            return (
+                float(unit.x) / (map_resolution / 2.0) - 1.0,
+                1.0 - float(unit.y) / (map_resolution / 2.0),
+                health_norm,
+            )
+        x_norm = (float(unit.x) - 64.0) / 128.0
+        y_norm = (float(unit.y) - 64.0) / 128.0
+        return (
+            math.floor(64.0 + x_norm * 108.0) / 64.0 - 1.0,
+            1.0 - math.floor(128.0 - (64.0 + y_norm * 100.0)) / 64.0,
+            health_norm,
+        )
+
+    def _eval_bktree_norm_state(self, my_units, enemy_units, fallback_state_norm):
+        if self._eval_bktree_normalization in {
+            "decision",
+            "live",
+            "predictionrts",
+            "pymarl_compatible",
+            "pymarl",
+            "onpolicy",
+        }:
+            return fallback_state_norm
+        my_sorted = sorted(my_units, key=lambda u: u.tag)
+        enemy_sorted = sorted(enemy_units, key=lambda u: u.tag)
+        return {
+            "red_army": [self._eval_bktree_norm_unit(u) for u in my_sorted],
+            "blue_army": [self._eval_bktree_norm_unit(u) for u in enemy_sorted],
+        }
+
+    def _save_eval_bktree(self) -> None:
+        if not self._eval_bktree_enabled or not self._eval_bktree_dir:
+            return
+        from pathlib import Path as _Path
+        import json as _json
+        import os as _os
+        import time as _time
+
+        def _replace_with_retry(src: _Path, dst: _Path, attempts: int = 8) -> bool:
+            last_error = None
+            for idx in range(max(int(attempts), 1)):
+                try:
+                    src.replace(dst)
+                    return True
+                except PermissionError as exc:
+                    last_error = exc
+                    _time.sleep(0.05 * (idx + 1))
+            try:
+                if dst.exists():
+                    _os.remove(str(dst))
+                src.replace(dst)
+                return True
+            except PermissionError as exc:
+                last_error = exc
+            except OSError as exc:
+                last_error = exc
+            print(
+                f"[EVAL-BKTREE][WARN] failed to replace {dst.name}; "
+                f"keeping previous snapshot: {last_error}",
+                flush=True,
+            )
+            return False
+
+        self._prepare_eval_bktree_dir()
+        bktree_dir = _Path(self._eval_bktree_dir)
+        primary_path = bktree_dir / "primary_bktree.json"
+        tmp_primary_path = bktree_dir / f"primary_bktree.json.{_os.getpid()}.tmp"
+        with open(str(tmp_primary_path), "w", encoding="utf-8") as f:
+            _json.dump(
+                self._serialize_bktree_node(
+                    self._eval_primary_bktree.root if self._eval_primary_bktree else None
+                ),
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        if not _replace_with_retry(tmp_primary_path, primary_path):
+            try:
+                tmp_primary_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        for primary_id, tree in sorted(self._eval_secondary_bktree.items()):
+            if tree.root is None:
+                continue
+            secondary_path = bktree_dir / f"secondary_bktree_{primary_id}.json"
+            tmp_secondary_path = (
+                bktree_dir / f"secondary_bktree_{primary_id}.json.{_os.getpid()}.tmp"
+            )
+            with open(str(tmp_secondary_path), "w", encoding="utf-8") as f:
+                _json.dump(self._serialize_bktree_node(tree.root), f, ensure_ascii=False, indent=2)
+            if not _replace_with_retry(tmp_secondary_path, secondary_path):
+                try:
+                    tmp_secondary_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        state_node_path = bktree_dir / "state_node.txt"
+        if self._eval_state_id_map:
+            tmp_state_node_path = bktree_dir / f"state_node.txt.{_os.getpid()}.tmp"
+            with open(str(tmp_state_node_path), "w", encoding="utf-8") as f:
+                for cluster, state_id in sorted(self._eval_state_id_map.items(), key=lambda item: item[1]):
+                    f.write(f"({cluster[0]}, {cluster[1]})\t{state_id}\n")
+            if not _replace_with_retry(tmp_state_node_path, state_node_path):
+                try:
+                    tmp_state_node_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        summary = {
+            "state_count": len(self._eval_state_id_map),
+            "new_state_count": self._eval_new_state_count,
+            "primary_count": len(self._eval_secondary_bktree),
+        }
+        with open(str(bktree_dir / "eval_bktree_summary.json"), "w", encoding="utf-8") as f:
+            _json.dump(summary, f, ensure_ascii=False, indent=2)
+
     def new_game(self):
         super().new_game()
         if not hasattr(self, "_mode"):
@@ -311,11 +705,30 @@ class KGGuidedAgent(SmartAgent):
         self._action_plan = []
         self._planned_states = []
         self._plan_idx = 0
+        self._active_plan_id = None
+        self._last_switch_event = None
+        self._last_no_switch_shadow = None
+        self._last_plan_switch_candidates = []
+        self._last_path_follow_event = None
+        self._last_planning_timing = {}
         self._all_beam_states = set()
         self._backup_continuations = {}
         self._exploration_targets = {}
         self._exploration_active = False
         self._exploration_trace = []
+
+        if self._eval_bktree_wait_for_new_game:
+            self._ep_history = []
+            self._ep_batch = []
+            self._prev_hp_my = None
+            self._prev_hp_enemy = None
+            self._prev_end_game_flag = False
+            self._configure_eval_bktree(reset=True)
+            self._eval_bktree_wait_for_new_game = False
+            print(
+                "[EVAL-BKTREE] armed at new game; discarded pre-eval partial episode",
+                flush=True,
+            )
 
         if not (self._mode == "replay" and self._replay_actions):
             if not self._prev_end_game_flag and self._ep_history:
@@ -338,14 +751,20 @@ class KGGuidedAgent(SmartAgent):
         if self._mode == "replay" and self._replay_actions:
             if self._ep_history:
                 ep_id = self.ctx.episode_count if self.ctx else 0
+                replay_score = (
+                    self._replay_forced_final_score
+                    if self._replay_forced_final_score is not None
+                    else 0
+                )
                 self._ep_batch.append(
                     {
                         "episode_id": ep_id,
                         "frames": list(self._ep_history),
                         "result": self.end_game_state or "Dogfall",
-                        "score": 0,
+                        "score": replay_score,
                     }
                 )
+                self._replay_forced_final_score = None
                 self._ep_history = []
             self._flush_ep_batch()
 
@@ -817,6 +1236,55 @@ class KGGuidedAgent(SmartAgent):
             return decision.action, routed_source, info
         return etg_action, event_type, info
 
+    def _build_mechanism_shadow_info(
+        self,
+        state_id: Any,
+        baseline_action: Optional[str],
+        baseline_source: str,
+        selected_action: Optional[str],
+        selected_source: str,
+        tuning_info: Optional[Dict[str, Any]],
+        nid_resolution: Optional[NidResolution],
+    ) -> Optional[Dict[str, Any]]:
+        if not self._beam_params.get("enable_mechanism_shadow_logging", False):
+            return None
+        info: Dict[str, Any] = {
+            "state_id": state_id,
+            "state_regime": "ood"
+            if nid_resolution is not None and nid_resolution.is_ood
+            else "graph_associated",
+            "baseline_policy": "no_action_tuning",
+            "baseline_action_code": baseline_action,
+            "baseline_source": baseline_source,
+            "selected_action_code": selected_action,
+            "selected_source": selected_source,
+            "mechanism_changed_action": bool(
+                selected_action is not None
+                and baseline_action is not None
+                and selected_action != baseline_action
+            ),
+            "tuning": tuning_info,
+        }
+        if nid_resolution is not None:
+            info["nid_resolution"] = {
+                "status": nid_resolution.status,
+                "reason": nid_resolution.reason,
+                "candidate_nid": nid_resolution.candidate_nid,
+                "distance": nid_resolution.distance,
+                "hp_distance": nid_resolution.hp_distance,
+                "is_ood": nid_resolution.is_ood,
+            }
+        model = self._get_action_tuning_model() if self._beam_params.get("enable_action_tuning", False) else None
+        if model is not None and state_id is not None:
+            try:
+                summary = model.get_state_summary(state_id)
+                actions = summary.get("actions", []) if isinstance(summary, dict) else []
+                info["model_total_visits"] = int(summary.get("total_visits", 0) or 0)
+                info["model_actions"] = actions[:8]
+            except Exception as exc:
+                info["model_error"] = str(exc)
+        return info
+
     def _restart_guard_config(self) -> Dict[str, Any]:
         return dict(self._beam_params.get("restart_guard", {}) or {})
 
@@ -923,6 +1391,145 @@ class KGGuidedAgent(SmartAgent):
             "warmup_remaining": self._restart_guard_warmup_remaining,
         }
 
+    def _planning_switch_logging_enabled(self) -> bool:
+        return bool(self._beam_params.get("enable_planning_switch_logging", False))
+
+    def _next_plan_id(self, state_id: Any) -> str:
+        self._plan_counter += 1
+        episode = getattr(getattr(self, "ctx", None), "episode_count", 0)
+        return f"ep{episode}_p{self._plan_counter}_s{state_id}"
+
+    def _path_summary_for_logging(self, path) -> Dict[str, Any]:
+        try:
+            from src.decision.kg_beam_search import _compute_path_composite
+
+            non_root = path[1:] if len(path) > 1 else []
+            return {
+                "score": float(_compute_path_composite(path)) if path else 0.0,
+                "cum_prob": float(path[-1].cumulative_probability) if path else 0.0,
+                "avg_future_reward": float(np.mean([n.avg_future_reward for n in non_root])) if non_root else 0.0,
+                "avg_quality": float(np.mean([n.quality_score for n in non_root])) if non_root else 0.0,
+                "states": [int(n.state) for n in path],
+                "actions": [n.action for n in non_root if n.action],
+            }
+        except Exception:
+            return {
+                "score": 0.0,
+                "cum_prob": 0.0,
+                "avg_future_reward": 0.0,
+                "avg_quality": 0.0,
+                "states": [],
+                "actions": [],
+            }
+
+    def _build_plan_switch_candidates_for_logging(self, plan, plan_id: str) -> List[Dict[str, Any]]:
+        if not self._planning_switch_logging_enabled():
+            return []
+        try:
+            from src.decision.chain_rollout import build_switching_map
+        except Exception:
+            return []
+        beam_paths = getattr(plan, "beam_paths", []) or []
+        best_idx = int(getattr(plan, "best_path_index", 0) or 0)
+        if not beam_paths or best_idx >= len(beam_paths):
+            return []
+        max_candidates = int(self._beam_params.get("planning_switch_max_candidates", 24))
+        score_threshold = float(self._beam_params.get("planning_switch_score_threshold", 0.0))
+        max_per_fork = int(self._beam_params.get("planning_switch_max_per_fork", 6))
+        main_path = beam_paths[best_idx]
+        main_summary = self._path_summary_for_logging(main_path)
+        switch_map = build_switching_map(
+            main_path,
+            beam_paths,
+            score_threshold=score_threshold,
+            max_per_fork=max_per_fork,
+        )
+        rows: List[Dict[str, Any]] = []
+        for fork_index, points in sorted(switch_map.items(), key=lambda item: item[0]):
+            for point in points:
+                if point.backup_path_idx >= len(beam_paths):
+                    continue
+                candidate_path = beam_paths[point.backup_path_idx]
+                candidate_summary = self._path_summary_for_logging(candidate_path)
+                candidate_node = (
+                    candidate_path[fork_index]
+                    if fork_index < len(candidate_path)
+                    else candidate_path[-1]
+                )
+                main_node = main_path[fork_index] if fork_index < len(main_path) else main_path[-1]
+                rows.append(
+                    {
+                        "plan_id": plan_id,
+                        "fork_index": int(fork_index),
+                        "predicted_state": int(point.predicted_state),
+                        "main_state": int(main_node.state),
+                        "candidate_state": int(candidate_node.state),
+                        "main_action": main_node.action,
+                        "candidate_action": candidate_node.action,
+                        "backup_path_idx": int(point.backup_path_idx),
+                        "backup_step_in_path": int(point.backup_step_in_path),
+                        "match_type": point.match_type,
+                        "remaining_actions": list(point.remaining_actions),
+                        "main_path_score": main_summary["score"],
+                        "candidate_path_score": candidate_summary["score"],
+                        "planning_score_gain": candidate_summary["score"] - main_summary["score"],
+                        "main_future_reward": main_summary["avg_future_reward"],
+                        "candidate_future_reward": candidate_summary["avg_future_reward"],
+                        "planning_future_reward_gain": (
+                            candidate_summary["avg_future_reward"]
+                            - main_summary["avg_future_reward"]
+                        ),
+                        "main_cum_prob": main_summary["cum_prob"],
+                        "candidate_cum_prob": candidate_summary["cum_prob"],
+                        "main_states": main_summary["states"],
+                        "candidate_states": candidate_summary["states"],
+                        "main_actions": main_summary["actions"],
+                        "candidate_actions": candidate_summary["actions"],
+                    }
+                )
+                if len(rows) >= max_candidates:
+                    return rows
+        return rows
+
+    def _compute_no_switch_shadow(self, state_id: int, lookahead_steps: int) -> Optional[Dict[str, Any]]:
+        if not self._planning_switch_logging_enabled():
+            return None
+        try:
+            from src.decision.kg_beam_search import plan_action
+
+            started = time.perf_counter()
+            shadow = plan_action(
+                self.kg,
+                self.transitions,
+                state_id,
+                beam_width=self._beam_params.get("beam_width", 3),
+                max_steps=lookahead_steps,
+                min_visits=self._beam_params.get("min_visits", 1),
+                min_cum_prob=self._beam_params.get("min_cum_prob", 0.01),
+                score_mode=self._beam_params.get("score_mode", "quality"),
+                max_state_revisits=self._beam_params.get("max_state_revisits", 2),
+                discount_factor=self._beam_params.get("discount_factor", 0.9),
+                action_strategy=self._action_strategy,
+                epsilon=self._beam_params.get("epsilon", 0.1),
+                finetune_model=self._get_finetune_model(),
+                dist_matrix=self._dist_matrix,
+            )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            return {
+                "policy": "clear_plan_and_replan",
+                "state_id": state_id,
+                "elapsed_ms": float(elapsed_ms),
+                "recommended_action": shadow.recommended_action,
+                "action_plan": list(shadow.action_plan),
+                "planned_states": list(shadow.planned_states),
+                "ranked_actions": list(shadow.ranked_actions[:8]),
+                "best_path_index": int(shadow.best_path_index or 0),
+                "beam_path_count": len(shadow.beam_paths),
+                "metrics": dict(shadow.metrics),
+            }
+        except Exception as exc:
+            return {"policy": "clear_plan_and_replan", "state_id": state_id, "error": str(exc)}
+
     def _get_plan_from_beam(
         self, state_id: int, lookahead_steps: int
     ) -> Tuple[Optional[str], List[str], List[int], List[Dict], List[Dict], List[str]]:
@@ -937,6 +1544,7 @@ class KGGuidedAgent(SmartAgent):
         finetune_model = self._get_finetune_model()
         dm = self._dist_matrix
 
+        started = time.perf_counter()
         plan = plan_action(
             self.kg,
             self.transitions,
@@ -952,10 +1560,21 @@ class KGGuidedAgent(SmartAgent):
             finetune_model=finetune_model,
             dist_matrix=dm,
         )
+        plan_elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self._last_planning_timing = {
+            "beam_plan_ms": float(plan_elapsed_ms),
+            "beam_width": int(self._beam_params.get("beam_width", 3)),
+            "lookahead_steps": int(lookahead_steps),
+            "beam_result_count": len(getattr(plan, "beam_results", []) or []),
+            "beam_path_count": len(getattr(plan, "beam_paths", []) or []),
+            "trigger_state_id": int(state_id),
+        }
 
         if plan.recommended_action is None:
             self._all_beam_states = set()
             self._backup_continuations = {}
+            self._active_plan_id = None
+            self._last_plan_switch_candidates = []
             return None, [], [], [], [], []
 
         beam_dicts = []
@@ -1002,6 +1621,12 @@ class KGGuidedAgent(SmartAgent):
 
         self._all_beam_states = all_beam_states
         self._backup_continuations = backup_continuations
+        plan_id = self._next_plan_id(state_id)
+        self._active_plan_id = plan_id
+        self._last_plan_switch_candidates = self._build_plan_switch_candidates_for_logging(
+            plan,
+            plan_id,
+        )
 
         beam_paths = []
         for rank, path in enumerate(plan.beam_paths):
@@ -1049,6 +1674,12 @@ class KGGuidedAgent(SmartAgent):
     def _local_decide(
         self, state_id: int, enemy_count: int = 0
     ) -> Tuple[Optional[str], str, Optional[Dict]]:
+        self._last_switch_event = None
+        self._last_no_switch_shadow = None
+        self._last_path_follow_event = None
+        self._last_planning_timing = {
+            "decision_start_state_id": int(state_id) if state_id is not None else None,
+        }
         if self.kg is None or self.transitions is None:
             return None, "fallback", None
 
@@ -1071,10 +1702,32 @@ class KGGuidedAgent(SmartAgent):
 
             if expected is not None and state_id == expected:
                 action = self._action_plan[self._plan_idx]
+                self._last_path_follow_event = {
+                    "plan_id": self._active_plan_id,
+                    "type": "follow_expected",
+                    "plan_idx": int(self._plan_idx),
+                    "expected_state": expected,
+                    "actual_state": state_id,
+                    "in_any_beam_state": True,
+                    "has_backup_continuation": state_id in self._backup_continuations,
+                    "enable_backup": bool(enable_backup),
+                    "backup_distance_threshold": float(backup_dist_threshold),
+                }
                 self._plan_idx += 1
                 return action, "kg_follow", self._last_plan_snap
 
             is_diverge = True
+            self._last_path_follow_event = {
+                "plan_id": self._active_plan_id,
+                "type": "diverged_from_expected",
+                "plan_idx": int(self._plan_idx),
+                "expected_state": expected,
+                "actual_state": state_id,
+                "in_any_beam_state": state_id in self._all_beam_states,
+                "has_backup_continuation": state_id in self._backup_continuations,
+                "enable_backup": bool(enable_backup),
+                "backup_distance_threshold": float(backup_dist_threshold),
+            }
 
             if (
                 enable_backup
@@ -1086,7 +1739,38 @@ class KGGuidedAgent(SmartAgent):
                     self._action_plan = list(actions)
                     self._planned_states = list(states)
                     self._plan_idx = 1
-                    return actions[0], "backup_switch_exact", self._last_plan_snap
+                    switch_event = {
+                        "plan_id": self._active_plan_id,
+                        "type": "backup_switch_exact",
+                        "expected_state": expected,
+                        "actual_state": state_id,
+                        "matched_backup_state": state_id,
+                        "distance": 0.0,
+                        "selected_backup_action": actions[0],
+                        "remaining_actions": list(actions),
+                        "remaining_states": list(states),
+                    }
+                    no_switch_shadow = self._compute_no_switch_shadow(state_id, lookahead)
+                    self._last_switch_event = switch_event
+                    self._last_no_switch_shadow = no_switch_shadow
+                    self._last_path_follow_event = {
+                        **(self._last_path_follow_event or {}),
+                        "type": "backup_switch_exact",
+                        "switch_type": "exact",
+                        "matched_backup_state": state_id,
+                        "switch_distance": 0.0,
+                        "selected_backup_action": actions[0],
+                    }
+                    plan_snap = dict(self._last_plan_snap or {})
+                    plan_snap["switch_event"] = switch_event
+                    plan_snap["no_switch_shadow"] = no_switch_shadow
+                    plan_snap["path_follow_event"] = self._last_path_follow_event
+                    plan_snap["planning_timing"] = dict(self._last_planning_timing or {})
+                    plan_snap["paired_counterfactual_id"] = (
+                        f"{self._active_plan_id}:frame{self._log_counters.get('total', 0)}:"
+                        f"{state_id}:backup_switch_exact"
+                    )
+                    return actions[0], "backup_switch_exact", plan_snap
 
                 best_backup_state = None
                 best_backup_dist = float("inf")
@@ -1120,11 +1804,48 @@ class KGGuidedAgent(SmartAgent):
                     self._action_plan = list(actions)
                     self._planned_states = list(states)
                     self._plan_idx = 1
-                    return actions[0], "backup_switch_fuzzy", self._last_plan_snap
+                    switch_event = {
+                        "plan_id": self._active_plan_id,
+                        "type": "backup_switch_fuzzy",
+                        "expected_state": expected,
+                        "actual_state": state_id,
+                        "matched_backup_state": best_backup_state,
+                        "distance": float(best_backup_dist),
+                        "distance_threshold": float(backup_dist_threshold),
+                        "selected_backup_action": actions[0],
+                        "remaining_actions": list(actions),
+                        "remaining_states": list(states),
+                    }
+                    no_switch_shadow = self._compute_no_switch_shadow(state_id, lookahead)
+                    self._last_switch_event = switch_event
+                    self._last_no_switch_shadow = no_switch_shadow
+                    self._last_path_follow_event = {
+                        **(self._last_path_follow_event or {}),
+                        "type": "backup_switch_fuzzy",
+                        "switch_type": "fuzzy",
+                        "matched_backup_state": best_backup_state,
+                        "switch_distance": float(best_backup_dist),
+                        "selected_backup_action": actions[0],
+                    }
+                    plan_snap = dict(self._last_plan_snap or {})
+                    plan_snap["switch_event"] = switch_event
+                    plan_snap["no_switch_shadow"] = no_switch_shadow
+                    plan_snap["path_follow_event"] = self._last_path_follow_event
+                    plan_snap["planning_timing"] = dict(self._last_planning_timing or {})
+                    plan_snap["paired_counterfactual_id"] = (
+                        f"{self._active_plan_id}:frame{self._log_counters.get('total', 0)}:"
+                        f"{state_id}:backup_switch_fuzzy"
+                    )
+                    return actions[0], "backup_switch_fuzzy", plan_snap
 
             self._action_plan = []
             self._planned_states = []
             self._plan_idx = 0
+            self._last_path_follow_event = {
+                **(self._last_path_follow_event or {}),
+                "type": "diverged_replan_required",
+                "replan_reason": "no_backup_continuation_or_disabled",
+            }
 
         if self._plan_idx >= len(self._action_plan):
             trigger = "diverge" if is_diverge else "exhausted"
@@ -1148,14 +1869,20 @@ class KGGuidedAgent(SmartAgent):
             self._plan_idx = 0
 
             plan_snap = {
+                "plan_id": self._active_plan_id,
                 "state_id": state_id,
                 "action_plan": actions,
                 "planned_states": states,
                 "beam_results": beam_dicts,
                 "beam_paths": beam_paths,
+                "plan_switch_candidates": list(getattr(self, "_last_plan_switch_candidates", []) or []),
                 "mode": "multi_step",
                 "trigger": trigger,
             }
+            if self._last_path_follow_event is not None:
+                plan_snap["path_follow_event"] = self._last_path_follow_event
+            if self._last_planning_timing:
+                plan_snap["planning_timing"] = dict(self._last_planning_timing)
             self._last_plan_snap = plan_snap
             _top3 = ranked[:3] if ranked else []
             _ap = actions[:3] if actions else []
@@ -1280,6 +2007,73 @@ class KGGuidedAgent(SmartAgent):
             )
         self._frame_count += 1
 
+    @staticmethod
+    def _unit_observation_snapshot(unit) -> Dict[str, Any]:
+        return {
+            "tag": int(getattr(unit, "tag", 0)),
+            "unit_type": int(getattr(unit, "unit_type", 0)),
+            "alliance": int(getattr(unit, "alliance", 0)),
+            "x": float(getattr(unit, "x", 0.0)),
+            "y": float(getattr(unit, "y", 0.0)),
+            "z": float(getattr(unit, "z", 0.0)),
+            "health": float(getattr(unit, "health", 0.0)),
+            "health_max": float(getattr(unit, "health_max", 0.0)),
+            "shield": float(getattr(unit, "shield", 0.0)),
+            "shield_max": float(getattr(unit, "shield_max", 0.0)),
+            "energy": float(getattr(unit, "energy", 0.0)),
+            "weapon_cooldown": float(getattr(unit, "weapon_cooldown", 0.0)),
+            "is_selected": bool(getattr(unit, "is_selected", False)),
+            "is_on_screen": bool(getattr(unit, "is_on_screen", False)),
+            "order_length": int(getattr(unit, "order_length", 0)),
+            "order_id_0": int(getattr(unit, "order_id_0", 0)),
+            "order_id_1": int(getattr(unit, "order_id_1", 0)),
+            "order_target_0": int(getattr(unit, "order_target_0", 0)),
+            "order_target_1": int(getattr(unit, "order_target_1", 0)),
+            "order_progress_0": float(getattr(unit, "order_progress_0", 0.0)),
+            "order_progress_1": float(getattr(unit, "order_progress_1", 0.0)),
+        }
+
+    @classmethod
+    def _frame_observation_snapshot(
+        cls,
+        obs,
+        my_units,
+        enemy_units,
+        state_norm: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        raw_units = getattr(obs.observation, "raw_units", [])
+        all_units_sorted = sorted(raw_units, key=lambda u: int(getattr(u, "tag", 0)))
+        return {
+            "game_loop": int(obs.observation.game_loop[0]),
+            "raw_unit_count": int(len(raw_units)),
+            "my_unit_tags": [int(getattr(u, "tag", 0)) for u in sorted(my_units, key=lambda u: u.tag)],
+            "enemy_unit_tags": [int(getattr(u, "tag", 0)) for u in sorted(enemy_units, key=lambda u: u.tag)],
+            "my_units": [cls._unit_observation_snapshot(u) for u in sorted(my_units, key=lambda u: u.tag)],
+            "enemy_units": [cls._unit_observation_snapshot(u) for u in sorted(enemy_units, key=lambda u: u.tag)],
+            "all_raw_units": [cls._unit_observation_snapshot(u) for u in all_units_sorted],
+            "state_norm": state_norm,
+        }
+
+    @staticmethod
+    def _episode_state_sequences(
+        frames: List[Dict[str, Any]]
+    ) -> Tuple[List[Any], List[int]]:
+        state_key_sequence: List[Any] = []
+        state_id_sequence: List[int] = []
+        for frame in frames:
+            if not isinstance(frame, dict):
+                continue
+            state_key = frame.get("state_key")
+            if state_key is not None:
+                state_key_sequence.append(state_key)
+            nid = frame.get("eval_state_id", frame.get("nid"))
+            if nid is not None:
+                try:
+                    state_id_sequence.append(int(nid))
+                except (TypeError, ValueError):
+                    continue
+        return state_key_sequence, state_id_sequence
+
     def _flush_ep_batch(self, counters_snapshot=None):
         if not self._ep_batch:
             return
@@ -1291,26 +2085,41 @@ class KGGuidedAgent(SmartAgent):
             result_dir.mkdir(parents=True, exist_ok=True)
             ep_file = result_dir / "episodes.jsonl"
             progress_file = result_dir / "progress.json"
+            node_log_file = result_dir / "bktree" / "node_log.txt"
+            if self._eval_bktree_enabled:
+                node_log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(str(ep_file), "a", encoding="utf-8") as f:
                 trial_number = getattr(self, "_flush_trial_number", None)
                 for ep in self._ep_batch:
+                    frames = ep.get("frames", [])
+                    state_key_sequence, state_id_sequence = (
+                        self._episode_state_sequences(frames)
+                    )
                     record = {
                         "episode_id": ep.get("episode_id", 0),
                         "result": ep.get("result", "Unknown"),
                         "score": ep.get("score", 0),
-                        "frames": ep.get("frames", []),
+                        "state_key_sequence": state_key_sequence,
+                        "state_id_sequence": state_id_sequence,
+                        "frames": frames,
                     }
                     if "restart_guard" in ep:
                         record["restart_guard"] = ep.get("restart_guard")
                     if trial_number is not None:
                         record["trial_number"] = trial_number
                     f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+                    if self._eval_bktree_enabled:
+                        with open(str(node_log_file), "a", encoding="utf-8") as nf:
+                            nf.write(" ".join(str(v) for v in state_id_sequence) + "\n")
                     self._local_completed += 1
             hp_file = result_dir / "episodes_hp.jsonl"
             with open(str(hp_file), "a", encoding="utf-8") as f:
                 trial_number = getattr(self, "_flush_trial_number", None)
                 for ep in self._ep_batch:
                     frames = ep.get("frames", [])
+                    state_key_sequence, state_id_sequence = (
+                        self._episode_state_sequences(frames)
+                    )
                     steps = []
                     for i, fr in enumerate(frames):
                         steps.append(
@@ -1331,6 +2140,8 @@ class KGGuidedAgent(SmartAgent):
                         "episode_id": ep.get("episode_id", 0),
                         "result": ep.get("result", "Unknown"),
                         "final_score": ep.get("score", 0),
+                        "state_key_sequence": state_key_sequence,
+                        "state_id_sequence": state_id_sequence,
                         "steps": steps,
                     }
                     if trial_number is not None:
@@ -1341,7 +2152,12 @@ class KGGuidedAgent(SmartAgent):
             if target > 0:
                 progress["target"] = target
             if self._local_completed > 0:
-                c = counters_snapshot if counters_snapshot else self._log_counters
+                if counters_snapshot is not None:
+                    c = dict(self._trial_log_counters)
+                else:
+                    c = dict(self._trial_log_counters)
+                    for key, value in self._log_counters.items():
+                        c[key] = c.get(key, 0) + value
                 total = max(c.get("total", 1), 1)
                 progress["fallback_ratio"] = round(
                     (c.get("fallback", 0) + c.get("nid_none", 0)) / total, 4
@@ -1392,6 +2208,25 @@ class KGGuidedAgent(SmartAgent):
                         progress[k] = c[k]
             with open(str(progress_file), "w", encoding="utf-8") as f:
                 _json.dump(progress, f)
+            self._save_eval_bktree()
+            try:
+                target_int = int(target or 0)
+            except (TypeError, ValueError):
+                target_int = 0
+            stop_when_target_reached = bool(
+                self._beam_params.get("stop_when_target_reached", False)
+            )
+            if stop_when_target_reached and target_int > 0 and self._local_completed >= target_int:
+                self._done = True
+                try:
+                    self.bridge.update_status(
+                        running=False,
+                        mode="completed",
+                        completed_episodes=self._local_completed,
+                        target_episodes=target_int,
+                    )
+                except Exception:
+                    pass
         for ep in self._ep_batch:
             try:
                 self.bridge.put_history(ep)
@@ -1701,6 +2536,7 @@ class KGGuidedAgent(SmartAgent):
         from pysc2.lib import actions as sc2_actions
 
         super(SmartAgent, self).step(obs, env)
+        self._last_planning_timing = {}
 
         try:
             while True:
@@ -1710,8 +2546,41 @@ class KGGuidedAgent(SmartAgent):
                 if "local_result_dir" in new_params:
                     self._local_result_dir = new_params["local_result_dir"]
                     self._local_completed = 0
+                    self._trial_log_counters = {
+                        key: 0 for key in self._log_counters
+                    }
                     self._flush_trial_number = new_params.get("trial_number")
+                    self._ep_history = []
+                    self._ep_batch = []
+                    self._prev_hp_my = None
+                    self._prev_hp_enemy = None
+                    self._eval_bktree_wait_for_new_game = True
                 self._beam_params.update(new_params)
+                if "eval_bktree_id_mode" in new_params:
+                    self._eval_bktree_id_mode = str(
+                        new_params.get("eval_bktree_id_mode") or "local_compact"
+                    ).lower()
+                if "eval_bktree_source_mode" in new_params:
+                    self._eval_bktree_source_mode = str(
+                        new_params.get("eval_bktree_source_mode") or "fresh"
+                    ).lower()
+                if "eval_bktree_normalization" in new_params:
+                    self._eval_bktree_normalization = str(
+                        new_params.get("eval_bktree_normalization") or "pymarl_compatible"
+                    ).lower()
+                if (
+                    "local_result_dir" in new_params
+                    or "eval_bktree_mode" in new_params
+                    or "enable_eval_bktree" in new_params
+                    or "eval_bktree_id_mode" in new_params
+                    or "eval_bktree_source_mode" in new_params
+                    or "eval_bktree_normalization" in new_params
+                ):
+                    self._configure_eval_bktree(reset=True)
+                if "replay_exhaustion_mode" in new_params:
+                    self._replay_exhaustion_mode = str(
+                        new_params.get("replay_exhaustion_mode") or "pause"
+                    )
                 if "enable_action_tuning" in new_params:
                     self._beam_params["enable_action_tuning"] = bool(new_params.get("enable_action_tuning"))
                 if any(
@@ -1883,11 +2752,20 @@ class KGGuidedAgent(SmartAgent):
             nid_resolution = self._resolve_nid_strict(p, s, state_norm)
         nid = nid_resolution.nid
         state_key = nid_resolution.state_key
+        eval_state_norm = self._eval_bktree_norm_state(
+            my_units,
+            enemy_units,
+            state_norm,
+        )
+        eval_state_id, eval_state_cluster, eval_bktree_status = (
+            self._resolve_eval_bktree_state_id(eval_state_norm)
+        )
         nid_fb = nid_resolution.is_fallback
         action_code = "4c"
         action_to_execute = None
         action_source = "fallback"
         plan_snap = None
+        mechanism_shadow = None
 
         hp_my = int(sum(u.health for u in my_units))
         hp_enemy = int(sum(u.health for u in enemy_units))
@@ -1947,16 +2825,48 @@ class KGGuidedAgent(SmartAgent):
                         }
                     )
                     self.bridge.update_status(replay_done=True)
-                    try:
-                        self.bridge.send_control("pause")
-                    except Exception:
-                        pass
-                return sc2_actions.RAW_FUNCTIONS.no_op()
+                    if self._replay_exhaustion_mode == "pause":
+                        try:
+                            self.bridge.send_control("pause")
+                        except Exception:
+                            pass
+                if self._replay_exhaustion_mode == "end_episode":
+                    final_score = hp_my - hp_enemy
+                    self._replay_forced_final_score = float(final_score)
+                    self.end_game_state = "Dogfall"
+                    env.f_result = "sequence_end"
+                    self.end_game_flag = True
+                    self._termination_signaled = True
+                    if self.end_game_frames > obs.observation.game_loop:
+                        self.end_game_frames = obs.observation.game_loop
+                    return sc2_actions.RAW_FUNCTIONS.no_op()
+                if self._replay_exhaustion_mode == "pause":
+                    return sc2_actions.RAW_FUNCTIONS.no_op()
+                if self._replay_exhaustion_mode == "no_op":
+                    action_to_execute = "no_op"
+                    action_source = "replay_tail_no_op"
+                elif self._replay_exhaustion_mode == "last_action" and self._last_action_executed:
+                    action_to_execute = self._last_action_executed
+                    action_source = "replay_tail_last_action"
+                else:
+                    if len(enemy_units) <= 1:
+                        action_to_execute = self._resolve_action("4b")
+                        action_code = "4b"
+                        action_source = "replay_tail_terminal_fix"
+                    else:
+                        action_to_execute = self._resolve_action(self._fallback_action)
+                        action_source = "replay_tail_fallback"
 
         elif self._mode != "replay" and nid is not None:
+            decision_started = time.perf_counter()
             action_code_raw, evt_type, plan_snap = self._local_decide(
                 nid, enemy_count=len(enemy_units)
             )
+            decision_elapsed_ms = (time.perf_counter() - decision_started) * 1000.0
+            self._last_planning_timing = {
+                **(self._last_planning_timing or {}),
+                "decision_elapsed_ms": float(decision_elapsed_ms),
+            }
             if (
                 action_code_raw is not None
                 and len(enemy_units) <= 1
@@ -1985,9 +2895,20 @@ class KGGuidedAgent(SmartAgent):
                     action_code_raw = override
                     evt_type = "override"
             tuning_info = None
+            baseline_action_code = action_code_raw
+            baseline_event_type = evt_type
             if action_code_raw is not None:
                 action_code_raw, evt_type, tuning_info = self._route_with_action_tuning(
                     nid, action_code_raw, evt_type
+                )
+                mechanism_shadow = self._build_mechanism_shadow_info(
+                    nid,
+                    baseline_action_code,
+                    baseline_event_type,
+                    action_code_raw,
+                    evt_type,
+                    tuning_info,
+                    nid_resolution,
                 )
             if action_code_raw is not None and not _is_valid_action_code(action_code_raw):
                 action_code_raw = self._fallback_action_code(p)
@@ -2012,9 +2933,20 @@ class KGGuidedAgent(SmartAgent):
             action_code_raw = self._fallback_action_code(p)
             evt_type = "ood"
             tuning_info = None
+            baseline_action_code = action_code_raw
+            baseline_event_type = evt_type
             if action_code_raw is not None:
                 action_code_raw, evt_type, tuning_info = self._route_with_action_tuning(
                     state_key, action_code_raw, evt_type
+                )
+                mechanism_shadow = self._build_mechanism_shadow_info(
+                    state_key,
+                    baseline_action_code,
+                    baseline_event_type,
+                    action_code_raw,
+                    evt_type,
+                    tuning_info,
+                    nid_resolution,
                 )
             if action_code_raw is not None and not _is_valid_action_code(action_code_raw):
                 action_code_raw = self._fallback_action_code(p)
@@ -2054,7 +2986,7 @@ class KGGuidedAgent(SmartAgent):
                     action_to_execute = "action_ATK_nearest_weakest"
                 action_source = "fallback"
 
-        if action_source == "fallback" and action_to_execute in self.actions:
+        if action_source in ("fallback", "replay_tail_fallback") and action_to_execute in self.actions:
             a_idx = self.actions.index(action_to_execute)
             _ci = _safe_cluster_digit(self._prev_state_cluster[0] if self._prev_state_cluster else None)
             action_code = _ci + chr(ord("a") + a_idx)
@@ -2102,11 +3034,14 @@ class KGGuidedAgent(SmartAgent):
                     flush=True,
                 )
 
-        if (my_units or enemy_units) and not (
+        suppress_replay_tail_record = (
             self._mode == "replay"
+            and self._replay_exhaustion_mode == "pause"
             and self._replay_per_ep > 0
             and self._replay_frame_count >= self._replay_per_ep
-        ):
+        )
+        suppress_eval_warmup_record = self._eval_bktree_wait_for_new_game
+        if (my_units or enemy_units) and not suppress_replay_tail_record and not suppress_eval_warmup_record:
             self._ep_history.append(
                 {
                     "state_cluster": (p, s),
@@ -2126,12 +3061,68 @@ class KGGuidedAgent(SmartAgent):
                         "ood_tuning",
                     ),
                     "state_key": state_key,
+                    "eval_state_id": eval_state_id,
+                    "eval_state_cluster": eval_state_cluster,
+                    "eval_bktree_status": eval_bktree_status,
+                    "eval_bktree_norm_state": eval_state_norm,
+                    "eval_bktree_normalization": self._eval_bktree_normalization,
                     "nid_status": nid_resolution.status,
                     "nid_reason": nid_resolution.reason,
                     "nid_candidate": nid_resolution.candidate_nid,
                     "nid_distance": nid_resolution.distance,
                     "nid_hp_distance": nid_resolution.hp_distance,
                     "nid_is_ood": nid_resolution.is_ood,
+                    "mechanism_shadow": mechanism_shadow,
+                    "shadow_no_mechanism_action_code": (
+                        mechanism_shadow.get("baseline_action_code")
+                        if isinstance(mechanism_shadow, dict)
+                        else None
+                    ),
+                    "shadow_selected_action_code": (
+                        mechanism_shadow.get("selected_action_code")
+                        if isinstance(mechanism_shadow, dict)
+                        else None
+                    ),
+                    "shadow_mechanism_changed_action": (
+                        mechanism_shadow.get("mechanism_changed_action")
+                        if isinstance(mechanism_shadow, dict)
+                        else None
+                    ),
+                    "plan_id": (
+                        plan_snap.get("plan_id")
+                        if isinstance(plan_snap, dict)
+                        else self._active_plan_id
+                    ),
+                    "plan_switch_candidates": (
+                        plan_snap.get("plan_switch_candidates", [])
+                        if isinstance(plan_snap, dict)
+                        else []
+                    ),
+                    "switch_event": (
+                        plan_snap.get("switch_event")
+                        if isinstance(plan_snap, dict)
+                        else None
+                    ),
+                    "no_switch_shadow": (
+                        plan_snap.get("no_switch_shadow")
+                        if isinstance(plan_snap, dict)
+                        else None
+                    ),
+                    "paired_counterfactual_id": (
+                        plan_snap.get("paired_counterfactual_id")
+                        if isinstance(plan_snap, dict)
+                        else None
+                    ),
+                    "path_follow_event": (
+                        plan_snap.get("path_follow_event")
+                        if isinstance(plan_snap, dict) and plan_snap.get("path_follow_event") is not None
+                        else self._last_path_follow_event
+                    ),
+                    "planning_timing": (
+                        plan_snap.get("planning_timing")
+                        if isinstance(plan_snap, dict) and plan_snap.get("planning_timing") is not None
+                        else dict(self._last_planning_timing or {})
+                    ),
                     "my_count": len(my_units),
                     "enemy_count": len(enemy_units),
                     "hp_my": hp_my,
@@ -2140,6 +3131,12 @@ class KGGuidedAgent(SmartAgent):
                     "game_loop": int(obs.observation.game_loop[0]),
                     "end_game_flag": self.end_game_flag,
                     "plan": plan_snap,
+                    "raw_observation": self._frame_observation_snapshot(
+                        obs,
+                        my_units,
+                        enemy_units,
+                        state_norm,
+                    ),
                     "my_units_pos": [
                         {"x": float(u.x), "y": float(u.y), "hp": float(u.health)}
                         for u in my_units
@@ -2329,24 +3326,28 @@ class KGGuidedAgent(SmartAgent):
 
                     self._save_shared_model()
 
+                    for k, v in self._log_counters.items():
+                        self._trial_log_counters[k] = (
+                            self._trial_log_counters.get(k, 0) + v
+                        )
                     for k in self._log_counters:
                         self._log_counters[k] = 0
                     self._ep_action_log = []
-            if self.ctx:
-                self.ctx.episode_count += 1
-            ep_id = self.ctx.episode_count if self.ctx else 0
-            self._ep_batch.append(
-                {
-                    "episode_id": ep_id,
-                    "frames": list(self._ep_history),
-                    "result": self.end_game_state,
-                    "score": float(hp_my - hp_enemy),
-                    "restart_guard": guard,
-                }
-            )
-            self._ep_history = []
-            self._replay_frame_count = 0
-            self._flush_ep_batch(counters_snapshot=_ep_counters)
+                if self.ctx:
+                    self.ctx.episode_count += 1
+                ep_id = self.ctx.episode_count if self.ctx else 0
+                self._ep_batch.append(
+                    {
+                        "episode_id": ep_id,
+                        "frames": list(self._ep_history),
+                        "result": self.end_game_state,
+                        "score": float(hp_my - hp_enemy),
+                        "restart_guard": guard,
+                    }
+                )
+                self._ep_history = []
+                self._replay_frame_count = 0
+                self._flush_ep_batch(counters_snapshot=_ep_counters)
         self._prev_end_game_flag = end_flag
 
         if self._pending_cluster and hasattr(self, self._pending_cluster):

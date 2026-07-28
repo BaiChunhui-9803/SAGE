@@ -9,6 +9,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 4,
+            "expected_spawn_count": 4,
+            "expected_unit_hp": 45,
         },
         # MM4m
         "sce-1m": {
@@ -16,6 +18,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 4,
+            "expected_spawn_count": 4,
+            "expected_unit_hp": 45,
         },
         # MM4dist
         "sce-2": {
@@ -23,6 +27,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 4,
+            "expected_spawn_count": 4,
+            "expected_unit_hp": 45,
         },
         # MM4distm
         "sce-2m": {
@@ -30,6 +36,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 4,
+            "expected_spawn_count": 4,
+            "expected_unit_hp": 45,
         },
         # MM8
         "sce-3": {
@@ -37,6 +45,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 8,
+            "expected_spawn_count": 8,
+            "expected_unit_hp": 45,
         },
         # MM8m
         "sce-3m": {
@@ -44,6 +54,8 @@ def get_map_config(map_key):
             "unit_type_id": 48,
             "unit_type": units.Terran.Marine,
             "unit_scale": 8,
+            "expected_spawn_count": 8,
+            "expected_unit_hp": 45,
         },
     }
 

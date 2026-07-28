@@ -28,6 +28,7 @@ from kg_web.live_game_tab import _render_live_game_sidebar, _render_live_game_co
 from kg_web.results_tab import _render_results_tab
 from kg_web.learner_tab import _render_learner_tab, _render_learner_sidebar
 from kg_web.experiment_compare_tab import _render_experiment_compare_tab
+from kg_web.data_filter_tab import _render_data_filter_tab
 
 
 def main():
@@ -50,8 +51,9 @@ def main():
         "结果分析",
         "参数寻优",
         "批量实验",
+        "数据筛选",
     ]
-    _TAB_ICONS = ["📋", "🕸️", "🔮", "🎮", "📊", "⚡", "📈", "🧪", "🗂️"]
+    _TAB_ICONS = ["📋", "🕸️", "🔮", "🎮", "📊", "⚡", "📈", "🧪", "🗂️", "🧹"]
 
     with st.sidebar:
         _sel = st.segmented_control(
@@ -541,6 +543,9 @@ def main():
 
     elif active_tab == 8:
         _render_experiment_compare_tab()
+
+    elif active_tab == 9:
+        _render_data_filter_tab()
 
 
 if __name__ == "__main__":

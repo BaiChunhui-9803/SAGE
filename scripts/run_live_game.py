@@ -25,7 +25,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src import ROOT_DIR
 
 
+def _ensure_utf8_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def _run_game_process(bridge, args):
+    _ensure_utf8_stdio()
     from absl import flags as absl_flags
 
     if not absl_flags.FLAGS.is_parsed():
@@ -96,10 +106,24 @@ def _run_game_process(bridge, args):
         beam_params["max_nid_fallback_dist"] = args.max_nid_fallback_dist
     if args.max_nid_fallback_hp_dist is not None:
         beam_params["max_nid_fallback_hp_dist"] = args.max_nid_fallback_hp_dist
+    if args.local_result_dir:
+        beam_params["local_result_dir"] = args.local_result_dir
+    if args.target_episodes is not None:
+        beam_params["target_episodes"] = args.target_episodes
+    if args.trial_number is not None:
+        beam_params["trial_number"] = args.trial_number
+    if args.plan_log_path:
+        beam_params["plan_log_path"] = args.plan_log_path
+    if args.replay_exhaustion_mode:
+        beam_params["replay_exhaustion_mode"] = args.replay_exhaustion_mode
     if args.tuning_force_explore:
         beam_params["tuning_force_explore"] = True
     if args.tuning_explore_ood is not None:
         beam_params["tuning_explore_ood"] = bool(args.tuning_explore_ood)
+    if args.enable_mechanism_shadow_logging:
+        beam_params["enable_mechanism_shadow_logging"] = True
+    if args.eval_bktree_normalization:
+        beam_params["eval_bktree_normalization"] = args.eval_bktree_normalization
     restart_guard = {
         "enabled": args.restart_guard_enabled,
         "warmup_episodes": args.restart_warmup_episodes,
@@ -132,8 +156,27 @@ def _run_game_process(bridge, args):
     if incremental_layer.get("enabled"):
         beam_params["incremental_layer"] = incremental_layer
 
+    if args.beam_params_file:
+        try:
+            with open(str(args.beam_params_file), "r", encoding="utf-8") as f:
+                loaded_params = json.load(f)
+            if isinstance(loaded_params, dict):
+                beam_params.update(loaded_params)
+        except Exception as exc:
+            print(f"[run_live_game] failed to load --beam_params_file: {exc}", flush=True)
+    if args.beam_params_json:
+        try:
+            loaded_params = json.loads(args.beam_params_json)
+            if isinstance(loaded_params, dict):
+                beam_params.update(loaded_params)
+        except Exception as exc:
+            print(f"[run_live_game] failed to parse --beam_params_json: {exc}", flush=True)
+
+    autopilot_mode = str(beam_params.get("mode") or args.autopilot_mode)
+    action_strategy = str(beam_params.get("action_strategy") or args.action_strategy)
+
     agent_type = (
-        "batch_replay" if args.autopilot_mode == "batch_replay" else "kg_guided"
+        "batch_replay" if autopilot_mode == "batch_replay" else "kg_guided"
     )
 
     cf_config = None
@@ -154,25 +197,28 @@ def _run_game_process(bridge, args):
         fallback_action=args.fallback_action,
         window_loc=window_loc,
         data_dir=args.data_dir,
-        autopilot_mode=args.autopilot_mode,
+        autopilot_mode=autopilot_mode,
         beam_params=beam_params,
         replay_actions=args.replay_actions.split(",") if args.replay_actions else None,
         replay_runs=args.replay_runs,
         kg_file=args.kg_file,
-        action_strategy=args.action_strategy,
+        action_strategy=action_strategy,
         batch_replay_count=args.replay_count,
         batch_start=args.batch_start,
         batch_end=args.batch_end,
+        batch_output_dir=args.batch_output_dir,
         primary_threshold=args.primary_threshold,
         secondary_threshold=args.secondary_threshold,
         max_episodes=args.max_episodes,
         override_model_path=args.override_model_path,
         cf_config=cf_config,
         cf_runs=args.cf_runs,
+        load_kg=not args.skip_game_kg,
     )
 
 
 def _run_api_process(bridge, args):
+    _ensure_utf8_stdio()
     from src.sc2env.bridge_server import run_server
 
     kg_file = None if args.skip_api_kg else args.kg_file
@@ -187,6 +233,7 @@ def _run_api_process(bridge, args):
 
 
 def main():
+    _ensure_utf8_stdio()
     parser = argparse.ArgumentParser(description="PredictionRTS Live Game System")
     parser.add_argument(
         "--mode",
@@ -217,6 +264,11 @@ def main():
         "--skip_api_kg",
         action="store_true",
         help="Do not preload KG in the API process; the game agent still loads it.",
+    )
+    parser.add_argument(
+        "--skip_game_kg",
+        action="store_true",
+        help="Do not load ETG/transitions/distance matrix in the game agent.",
     )
     parser.add_argument(
         "--window_x", type=int, default=None, help="SC2 window X position"
@@ -285,6 +337,34 @@ def main():
         "--replay_runs", type=int, default=1, help="Number of replay runs"
     )
     parser.add_argument(
+        "--replay_exhaustion_mode",
+        choices=["pause", "end_episode", "fallback", "last_action", "no_op"],
+        default=None,
+        help="Replay behavior after the recorded action sequence is exhausted",
+    )
+    parser.add_argument(
+        "--local_result_dir",
+        default=None,
+        help="Directory for local episodes.jsonl/progress.json output",
+    )
+    parser.add_argument(
+        "--target_episodes",
+        type=int,
+        default=None,
+        help="Target episode count recorded in progress.json",
+    )
+    parser.add_argument(
+        "--trial_number",
+        type=int,
+        default=None,
+        help="Trial/repeat identifier written to local result records",
+    )
+    parser.add_argument(
+        "--plan_log_path",
+        default=None,
+        help="Optional planning/action log path for local evaluation",
+    )
+    parser.add_argument(
         "--replay_count",
         type=int,
         default=3,
@@ -295,6 +375,11 @@ def main():
     )
     parser.add_argument(
         "--batch_end", type=int, default=None, help="Batch replay end index"
+    )
+    parser.add_argument(
+        "--batch_output_dir",
+        default=None,
+        help="Base output directory for batch_replay ReplayCollector artifacts",
     )
     parser.add_argument(
         "--primary_threshold",
@@ -370,6 +455,17 @@ def main():
     parser.add_argument("--tuning_ood_distance_bucket", type=float, default=None)
     parser.add_argument("--tuning_force_explore", action="store_true")
     parser.add_argument("--tuning_explore_ood", type=int, choices=[0, 1], default=None)
+    parser.add_argument(
+        "--enable_mechanism_shadow_logging",
+        action="store_true",
+        help="Record per-frame no-mechanism shadow decisions for final-eval mechanism diagnostics",
+    )
+    parser.add_argument(
+        "--eval_bktree_normalization",
+        choices=["pymarl_compatible", "pymarl", "onpolicy", "decision", "live", "predictionrts"],
+        default=None,
+        help="Normalization used only for final-eval BKTree/state-id recording",
+    )
     parser.add_argument("--max_nid_fallback_dist", type=float, default=None)
     parser.add_argument("--max_nid_fallback_hp_dist", type=float, default=None)
     parser.add_argument("--restart_guard_enabled", action="store_true")
@@ -390,6 +486,16 @@ def main():
     parser.add_argument("--incremental_persist_interval", type=int, default=10)
     parser.add_argument("--incremental_min_new_state_distance", type=float, default=1.0)
     parser.add_argument("--incremental_layer_json", default=None)
+    parser.add_argument(
+        "--beam_params_file",
+        default=None,
+        help="JSON file merged into initial KGGuidedAgent beam params before game startup",
+    )
+    parser.add_argument(
+        "--beam_params_json",
+        default=None,
+        help="Inline JSON merged into initial KGGuidedAgent beam params before game startup",
+    )
     args = parser.parse_args()
 
     if args.mode in ("game", "all") and args.kg_file is None:

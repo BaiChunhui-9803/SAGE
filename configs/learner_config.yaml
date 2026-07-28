@@ -58,9 +58,11 @@ execution:
 game:
   api_load_kg: false
   autopilot_mode: multi_step
-  data_dir: data/MarineMicro_MvsM_4/augmented_1
+  # The public release ships this compact baseline artifact. Full augmented
+  # artifacts can be generated locally with scripts/build_from_collected.py.
+  data_dir: data/MarineMicro_MvsM_4/6
   fallback_action: action_ATK_nearest_weakest
-  kg_file: MarineMicro_MvsM_4_augmented/kg_simple.pkl
+  kg_file: MarineMicro_MvsM_4/kg_simple.pkl
   map_key: sce-1
 incremental_layer:
   delta_dir: incremental_layer
@@ -77,27 +79,27 @@ objective:
 phased_optimization:
   cycle: true
   default_phase: synergy
-  enabled: false
+  enabled: true
   etg_target_objective: 35.0
   exclude_exploration_from_optimization: true
   exploration_min_rate: 0.2
   exploration_target_avg_score: 10.0
   mode: cycle
   stages:
-  - max_trials: 50
-    min_trials: 20
+  - max_trials: 20
+    min_trials: 10
     name: etg_only
     target_objective: 35.0
-    trials: 50
-  - max_trials: 50
-    min_trials: 20
+    trials: 20
+  - max_trials: 20
+    min_trials: 10
     name: exploration_only
     target_avg_score: 10.0
-    trials: 50
-  - max_trials: 100
-    min_trials: 50
+    trials: 20
+  - max_trials: 50
+    min_trials: 20
     name: synergy
-    trials: 100
+    trials: 50
   synergy_etg_first: true
   synergy_etg_pool_size: 3
   synergy_etg_protected_sources:

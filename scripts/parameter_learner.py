@@ -521,7 +521,12 @@ class ParameterLearner:
         self._action_tuning_model_path = self.results_dir / "action_tuning_model.pkl"
         self._incremental_cfg = self.cfg.get("incremental_layer", {})
         self._phase_cfg = self.cfg.get("phased_optimization", {}) or {}
-        self._current_phase = "synergy"
+        self._phase_enabled = bool(self._phase_cfg.get("enabled", False))
+        self._current_phase = (
+            str(self._phase_cfg.get("default_phase", "synergy"))
+            if self._phase_enabled
+            else "etg_only"
+        )
         self._phase_history = []
         stages = self._phase_cfg.get("stages", []) or []
         self._adaptive_phase = str(stages[0].get("name", "etg_only")) if stages else "synergy"
@@ -529,14 +534,56 @@ class ParameterLearner:
         self._best_etg_params = None
         self._best_etg_value = -float("inf")
         self._etg_param_pool = []
+        self._fixed_etg_param_pool = self._load_fixed_etg_param_pool()
+
+    def _load_fixed_etg_param_pool(self) -> list:
+        raw_pool = (
+            self._phase_cfg.get("fixed_etg_param_pool")
+            or self._phase_cfg.get("fixed_synergy_etg_params")
+            or []
+        )
+        if not isinstance(raw_pool, list):
+            return []
+        pool = []
+        for idx, item in enumerate(raw_pool):
+            if not isinstance(item, dict):
+                continue
+            raw_params = item.get("params")
+            if not isinstance(raw_params, dict):
+                raw_params = item.get("override")
+            if not isinstance(raw_params, dict):
+                continue
+            params = {k: raw_params[k] for k in _ETG_PARAM_KEYS if k in raw_params}
+            if not params:
+                continue
+            params["mode"] = "multi_step"
+            metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+            value = metrics.get("avg_score", item.get("value", item.get("score", 0.0)))
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = 0.0
+            pool.append(
+                {
+                    "trial": int(item.get("rank", idx + 1) or idx + 1),
+                    "value": value,
+                    "params": params,
+                    "source": str(item.get("name") or item.get("selection_reason") or "fixed_pool"),
+                }
+            )
+        pool.sort(key=lambda entry: entry.get("value", -float("inf")), reverse=True)
+        if pool:
+            print(f"  [PHASE] loaded fixed ETG param pool: {len(pool)} candidates", flush=True)
+        return pool
 
     def _select_synergy_etg_params(self) -> dict:
         if not self._phase_cfg.get("synergy_use_best_etg_params", True):
             return {}
-        if not self._etg_param_pool:
+        source_pool = self._fixed_etg_param_pool or self._etg_param_pool
+        if not source_pool:
             return self._best_etg_params or _fixed_etg_params_from_cfg(self.cfg)
         pool_size = int(self._phase_cfg.get("synergy_etg_pool_size", 3) or 1)
-        pool = self._etg_param_pool[: max(pool_size, 1)]
+        pool = source_pool[: max(pool_size, 1)]
         selection = str(self._phase_cfg.get("synergy_etg_selection", "weighted"))
         if selection == "best":
             item = pool[0]
@@ -553,7 +600,16 @@ class ParameterLearner:
             if sum(numeric_weights) <= 0:
                 numeric_weights = [1.0 / len(pool)] * len(pool)
             total_weight = sum(numeric_weights)
-            used = len([h for h in self._phase_history if h["phase"] == "synergy"])
+            if self._fixed_etg_param_pool:
+                used = len(
+                    [
+                        h
+                        for h in self._phase_history
+                        if h["phase"] in ("exploration_only", "synergy")
+                    ]
+                )
+            else:
+                used = len([h for h in self._phase_history if h["phase"] == "synergy"])
             slot = ((used * 37) % 100) / 100.0
             cumulative = 0.0
             item = pool[-1]
@@ -563,7 +619,16 @@ class ParameterLearner:
                     item = candidate
                     break
         else:
-            used = len([h for h in self._phase_history if h["phase"] == "synergy"])
+            if self._fixed_etg_param_pool:
+                used = len(
+                    [
+                        h
+                        for h in self._phase_history
+                        if h["phase"] in ("exploration_only", "synergy")
+                    ]
+                )
+            else:
+                used = len([h for h in self._phase_history if h["phase"] == "synergy"])
             item = pool[used % len(pool)]
         params = dict(item.get("params", {}) or {})
         params["synergy_etg_source_trial"] = int(item.get("trial", -1))
@@ -585,8 +650,8 @@ class ParameterLearner:
         return stages[(stages.index(phase) + 1) % len(stages)]
 
     def _phase_for_index(self, index: int) -> str:
-        if not self._phase_cfg.get("enabled", False):
-            return "synergy"
+        if not self._phase_enabled:
+            return "etg_only"
         if str(self._phase_cfg.get("mode", "cycle")) == "adaptive":
             return self._adaptive_phase
         stages = self._phase_cfg.get("stages", []) or []
@@ -622,7 +687,7 @@ class ParameterLearner:
             phased["tuning_explore_sources"] = []
             phased["phase"] = phase
         elif phase == "exploration_only":
-            phased.update(self._best_etg_params or _fixed_etg_params_from_cfg(self.cfg))
+            phased.update(self._select_synergy_etg_params())
             phased["enable_action_tuning"] = True
             phased["tuning_force_explore"] = True
             phased["tuning_explore_ood"] = True
@@ -724,6 +789,23 @@ class ParameterLearner:
                 or {}
             )
             phased["phase"] = phase
+        return phased
+
+    def _apply_non_phased_params(self, params: dict) -> dict:
+        phased = dict(params)
+        phased["tuning_ood_key_mode"] = str(
+            self._tuning_cfg.get("ood_key_mode", "aggregate")
+        )
+        phased["tuning_ood_distance_bucket"] = float(
+            self._tuning_cfg.get("ood_distance_bucket", 0.5)
+        )
+        phased["enable_action_tuning"] = False
+        phased["tuning_force_explore"] = False
+        phased["tuning_explore_ood"] = False
+        phased["exclude_from_parameter_optimization"] = False
+        phased["tuning_explore_rate"] = 0.0
+        phased["tuning_explore_sources"] = []
+        phased["phase"] = "etg_only"
         return phased
 
     def _record_phase_result(self, phase: str, value: float, metrics: dict, trial_number: int) -> None:
@@ -901,6 +983,10 @@ class ParameterLearner:
             cmd.append("--skip_api_kg")
         if game.get("fallback_action"):
             cmd.extend(["--fallback_action", game["fallback_action"]])
+        if game.get("initial_beam_params_file"):
+            cmd.extend(["--beam_params_file", str(game["initial_beam_params_file"])])
+        if game.get("initial_beam_params_json"):
+            cmd.extend(["--beam_params_json", str(game["initial_beam_params_json"])])
         bktree_cfg = self.cfg.get("bktree", {}) or {}
         primary_threshold = float(bktree_cfg.get("primary_threshold", 1.0))
         secondary_threshold = float(bktree_cfg.get("secondary_threshold", 0.5))
@@ -1104,7 +1190,10 @@ class ParameterLearner:
     def _objective(self, trial: optuna.Trial, study: optuna.Study) -> float:
         space = self.cfg["search_space"]
         params = _sample_params(trial, space, self.cfg)
-        params = self._apply_phase_to_params(params, self._current_phase)
+        if self._phase_enabled:
+            params = self._apply_phase_to_params(params, self._current_phase)
+        else:
+            params = self._apply_non_phased_params(params)
         value = self._execute_trial(trial, params)
         if params.get("exclude_from_parameter_optimization", False):
             trial.set_user_attr("probe_objective", value)
@@ -1143,6 +1232,7 @@ class ParameterLearner:
         send_params["local_result_dir"] = str(trial_dir)
         send_params["target_episodes"] = target_episodes
         send_params["trial_number"] = trial.number
+        send_params["stop_when_target_reached"] = False
 
         sent = False
         for _attempt in range(3):
@@ -1347,6 +1437,7 @@ class ParameterLearner:
         send_params["target_episodes"] = target_episodes
         send_params["trial_number"] = trial_number
         send_params["plan_log_path"] = str(trial_dir / "plan.log")
+        send_params["stop_when_target_reached"] = False
 
         sent = False
         for _attempt in range(5):

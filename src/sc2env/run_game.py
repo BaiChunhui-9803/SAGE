@@ -65,6 +65,17 @@ def kill_all_units(env, obs):
     env._controllers[0].debug(debug_command)
 
 
+def _map_resolution_value() -> float:
+    try:
+        return float(_ENV_CONFIG.get("_MAP_RESOLUTION", 128) or 128)
+    except Exception:
+        return 128.0
+
+
+def _debug_spawn_point(pos):
+    return sc_common.Point2D(x=float(pos[0]), y=_map_resolution_value() - float(pos[1]))
+
+
 def spawn_units(env, agent):
     unit_type_id = _MAP["unit_type_id"]
     debug_commands = []
@@ -74,7 +85,7 @@ def spawn_units(env, agent):
                 create_unit=sc_debug.DebugCreateUnit(
                     unit_type=unit_type_id,
                     owner=1,
-                    pos=sc_common.Point2D(x=pos[0], y=pos[1]),
+                    pos=_debug_spawn_point(pos),
                     quantity=1,
                 )
             )
@@ -85,12 +96,213 @@ def spawn_units(env, agent):
                 create_unit=sc_debug.DebugCreateUnit(
                     unit_type=unit_type_id,
                     owner=2,
-                    pos=sc_common.Point2D(x=pos[0], y=pos[1]),
+                    pos=_debug_spawn_point(pos),
                     quantity=1,
                 )
             )
         )
     env._controllers[0].debug(debug_commands)
+
+
+def _no_op_actions(count: int):
+    return [actions.RAW_FUNCTIONS.no_op() for _ in range(max(int(count or 1), 1))]
+
+
+def _unit_health_value(unit) -> float:
+    try:
+        return float(getattr(unit, "health"))
+    except Exception:
+        try:
+            return float(unit["health"])
+        except Exception:
+            return 0.0
+
+
+def _unit_order_length(unit) -> int:
+    try:
+        return int(getattr(unit, "order_length", 0) or 0)
+    except Exception:
+        try:
+            return int(unit.get("order_length", 0) or 0)
+        except Exception:
+            return 0
+
+
+def _prime_debug_spawn_positions(agent, timestep):
+    my_units = agent.get_my_units_by_type(timestep, _MAP["unit_type"])
+    enemy_units = agent.get_enemy_units_by_type(timestep, _MAP["unit_type"])
+    if getattr(agent, "_initial_units_my", None) and getattr(agent, "_initial_units_enemy", None):
+        return
+    agent._initial_units_my = [(u.x, u.y) for u in my_units]
+    agent._initial_units_enemy = [(u.x, u.y) for u in enemy_units]
+    agent._initial_spawned = True
+
+
+def _spawn_validation_snapshot(agent, timestep):
+    my_units = agent.get_my_units_by_type(timestep, _MAP["unit_type"])
+    enemy_units = agent.get_enemy_units_by_type(timestep, _MAP["unit_type"])
+    return {
+        "my_count": len(my_units),
+        "enemy_count": len(enemy_units),
+        "my_hp": int(sum(_unit_health_value(u) for u in my_units)),
+        "enemy_hp": int(sum(_unit_health_value(u) for u in enemy_units)),
+        "order_count": int(
+            sum(_unit_order_length(u) for u in my_units)
+            + sum(_unit_order_length(u) for u in enemy_units)
+        ),
+        "my_positions": sorted(
+            [(float(getattr(u, "x", 0.0)), float(getattr(u, "y", 0.0))) for u in my_units]
+        ),
+        "enemy_positions": sorted(
+            [(float(getattr(u, "x", 0.0)), float(getattr(u, "y", 0.0))) for u in enemy_units]
+        ),
+    }
+
+
+def _expected_spawn_snapshot():
+    expected_count = int(_MAP.get("expected_spawn_count", _MAP.get("unit_scale", 0)) or 0)
+    expected_unit_hp = int(_MAP.get("expected_unit_hp", 45) or 45)
+    expected_total_hp = expected_count * expected_unit_hp
+    return {
+        "my_count": expected_count,
+        "enemy_count": expected_count,
+        "my_hp": expected_total_hp,
+        "enemy_hp": expected_total_hp,
+    }
+
+
+def _is_expected_spawn(snapshot):
+    expected = _expected_spawn_snapshot()
+    return (
+        snapshot["my_count"] == expected["my_count"]
+        and snapshot["enemy_count"] == expected["enemy_count"]
+        and snapshot["my_hp"] == expected["my_hp"]
+        and snapshot["enemy_hp"] == expected["enemy_hp"]
+    )
+
+
+def _position_max_abs_error(actual, expected) -> Optional[float]:
+    if not expected:
+        return None
+    actual_sorted = sorted((float(x), float(y)) for x, y in actual)
+    expected_sorted = sorted((float(x), float(y)) for x, y in expected)
+    if len(actual_sorted) != len(expected_sorted):
+        return float("inf")
+    max_error = 0.0
+    for (ax, ay), (ex, ey) in zip(actual_sorted, expected_sorted):
+        max_error = max(max_error, abs(ax - ex), abs(ay - ey))
+    return max_error
+
+
+def _spawn_position_errors(agent, snapshot):
+    return (
+        _position_max_abs_error(
+            snapshot.get("my_positions", []),
+            getattr(agent, "_initial_units_my", []) or [],
+        ),
+        _position_max_abs_error(
+            snapshot.get("enemy_positions", []),
+            getattr(agent, "_initial_units_enemy", []) or [],
+        ),
+    )
+
+
+def _spawn_coordinates_ok(my_error: Optional[float], enemy_error: Optional[float], tolerance: float) -> bool:
+    return (
+        (my_error is None or my_error <= tolerance)
+        and (enemy_error is None or enemy_error <= tolerance)
+    )
+
+
+def _validate_map_reset_spawn(agent, timestep, bridge: Optional[GameBridge] = None, label: str = "reset"):
+    snapshot = _spawn_validation_snapshot(agent, timestep)
+    expected_snapshot = _expected_spawn_snapshot()
+    coordinate_tolerance = 0.75
+    my_error, enemy_error = _spawn_position_errors(agent, snapshot)
+    coordinates_ok = _spawn_coordinates_ok(my_error, enemy_error, coordinate_tolerance)
+    if _is_expected_spawn(snapshot) and coordinates_ok:
+        return
+    message = (
+        f"map reset spawn validation failed ({label}); "
+        f"snapshot={snapshot}; expected={expected_snapshot}; "
+        f"my_position_error={my_error}; enemy_position_error={enemy_error}; "
+        f"coordinate_tolerance={coordinate_tolerance}"
+    )
+    print(f"[run_game][ERROR] {message}", flush=True)
+    _put_bridge_event(bridge, "error", message)
+    raise RuntimeError(message)
+
+
+def _put_bridge_event(bridge: Optional[GameBridge], level: str, message: str):
+    if not bridge:
+        return
+    try:
+        bridge.put_event({"level": level, "source": "game", "message": message})
+    except Exception:
+        pass
+
+
+def _reset_debug_spawn_verified(
+    env,
+    agents,
+    timesteps,
+    bridge: Optional[GameBridge] = None,
+    label: str = "reset",
+    max_attempts: int = 6,
+    kill_settle_steps: int = 4,
+    spawn_settle_steps: int = 3,
+):
+    if not agents:
+        return timesteps
+    agent = agents[0]
+    no_ops = _no_op_actions(len(agents))
+    _prime_debug_spawn_positions(agent, timesteps[0])
+    expected_snapshot = _expected_spawn_snapshot()
+
+    last_snapshot = None
+    for attempt in range(1, max(int(max_attempts), 1) + 1):
+        kill_all_units(env, timesteps[0].observation)
+        timesteps = env.step(no_ops, max(int(kill_settle_steps), 1))
+        kill_snapshot = _spawn_validation_snapshot(agent, timesteps[0])
+        if kill_snapshot["my_count"] or kill_snapshot["enemy_count"]:
+            kill_all_units(env, timesteps[0].observation)
+            timesteps = env.step(no_ops, max(int(kill_settle_steps), 1))
+
+        spawn_units(env, agent)
+        timesteps = env.step(no_ops, max(int(spawn_settle_steps), 1))
+        last_snapshot = _spawn_validation_snapshot(agent, timesteps[0])
+        coordinate_tolerance = 0.75
+        my_error, enemy_error = _spawn_position_errors(agent, last_snapshot)
+        if _is_expected_spawn(last_snapshot) and _spawn_coordinates_ok(my_error, enemy_error, coordinate_tolerance):
+            if attempt > 1:
+                print(
+                    f"[run_game] verified debug spawn recovered after {attempt} attempts "
+                    f"({label}): {last_snapshot}",
+                    flush=True,
+                )
+                _put_bridge_event(
+                    bridge,
+                    "warn",
+                    f"debug spawn 重试 {attempt} 次后恢复: {last_snapshot}",
+                )
+            return timesteps
+
+        print(
+            f"[run_game][WARN] invalid debug spawn ({label}) attempt "
+            f"{attempt}/{max_attempts}: {last_snapshot}, expected={expected_snapshot}, "
+            f"my_position_error={my_error}, enemy_position_error={enemy_error}",
+            flush=True,
+        )
+        _put_bridge_event(
+            bridge,
+            "warn",
+            f"debug spawn 校验失败 {attempt}/{max_attempts}: {last_snapshot}, expected={expected_snapshot}",
+        )
+
+    raise RuntimeError(
+        f"debug spawn validation failed after {max_attempts} attempts "
+        f"({label}); last_snapshot={last_snapshot}; expected={expected_snapshot}"
+    )
 
 
 def _move_sc2_window(x=50, y=50, w=640, h=480, timeout=10):
@@ -113,6 +325,9 @@ def run_loop_custom(
     max_frames=0,
     max_episodes=0,
     bridge: Optional[GameBridge] = None,
+    force_initial_debug_spawn: bool = False,
+    reset_between_episodes: bool = False,
+    validate_manual_spawn: bool = False,
 ):
     """A run loop to have agents and an environment interact.
 
@@ -179,6 +394,33 @@ def run_loop_custom(
             timesteps = env.reset()
             for a in agents:
                 a.reset()
+            if (reset_between_episodes or validate_manual_spawn) and agents:
+                _validate_map_reset_spawn(agents[0], timesteps[0], bridge=bridge, label="initial")
+            if force_initial_debug_spawn and agents:
+                try:
+                    timesteps = _reset_debug_spawn_verified(
+                        env,
+                        agents,
+                        timesteps,
+                        bridge=bridge,
+                        label="initial",
+                    )
+                    if hasattr(agents[0], "new_game"):
+                        agents[0].new_game()
+                    print(
+                        "[run_game] force_initial_debug_spawn applied before first eval frame",
+                        flush=True,
+                    )
+                except Exception as e:
+                    if bridge:
+                        bridge.put_event(
+                            {
+                                "level": "error",
+                                "source": "game",
+                                "message": f"首局 debug spawn 初始化异常: {e}",
+                            }
+                        )
+                    raise
             while True:
                 if bridge and bridge.should_stop():
                     bridge.update_status(running=False, mode="stopped")
@@ -233,7 +475,7 @@ def run_loop_custom(
                     for agent, timestep in zip(agents, timesteps)
                 ]
 
-                if env.f_result == "win" or env.f_result == "loss":
+                if env.f_result in ("win", "loss", "sequence_end"):
                     result_str = str(env.f_result)
                     obs_now = timesteps[0]
                     my_units = agents[0].get_my_units_by_type(
@@ -245,6 +487,9 @@ def run_loop_custom(
                     my_hp = sum(u["health"] for u in my_units)
                     enemy_hp = sum(u["health"] for u in enemy_units)
                     score_val = my_hp - enemy_hp
+                    display_result = getattr(agents[0], "end_game_state", None)
+                    if not display_result:
+                        display_result = "Win" if result_str == "win" else "Loss"
                     try:
                         if bridge:
                             if bridge.check_run_episode():
@@ -271,11 +516,51 @@ def run_loop_custom(
                         else:
                             agents[0]._end_episode(timesteps[0])
                             agents[0]._termination_signaled = False
-                        kill_all_units(env, timesteps[0].observation)
                         env.f_result = None
                         total_frames = 0
-                        spawn_units(env, agents[0])
-                        timesteps = env.step(agent_actions, 2)
+                        if reset_between_episodes:
+                            if bridge:
+                                ep_num = (
+                                    getattr(
+                                        agents[0].ctx, "episode_count", env.total_episodes
+                                    )
+                                    if hasattr(agents[0], "ctx") and agents[0].ctx
+                                    else env.total_episodes
+                                )
+                                bridge.put_event(
+                                    {
+                                        "level": "success"
+                                        if result_str == "win"
+                                        else "error",
+                                        "source": "game",
+                                        "message": f"Episode #{ep_num} 判定 {result_str.upper()}, 得分: {score_val:+d} (我方{my_hp} vs 敌方{enemy_hp})",
+                                    }
+                                )
+                            if getattr(agents[0], "_done", False):
+                                if bridge:
+                                    bridge.update_status(running=False, mode="completed")
+                                return
+                            break
+                        if force_initial_debug_spawn:
+                            timesteps = _reset_debug_spawn_verified(
+                                env,
+                                agents,
+                                timesteps,
+                                bridge=bridge,
+                                label=f"episode_end:{result_str}",
+                            )
+                        elif validate_manual_spawn:
+                            timesteps = _reset_debug_spawn_verified(
+                                env,
+                                agents,
+                                timesteps,
+                                bridge=bridge,
+                                label=f"manual_spawn:{result_str}",
+                            )
+                        else:
+                            kill_all_units(env, timesteps[0].observation)
+                            spawn_units(env, agents[0])
+                            timesteps = env.step(agent_actions, 2)
                         env.total_episodes += 1
                         if bridge:
                             ep_num = (
@@ -295,7 +580,9 @@ def run_loop_custom(
                                 }
                             )
                         if getattr(agents[0], "_done", False):
-                            break
+                            if bridge:
+                                bridge.update_status(running=False, mode="completed")
+                            return
                         continue
                     except Exception as e:
                         if bridge:
@@ -334,11 +621,47 @@ def run_loop_custom(
                     else:
                         agents[0]._end_episode(timesteps[0])
                         agents[0]._termination_signaled = False
-                    kill_all_units(env, timesteps[0].observation)
                     env.f_result = None
                     total_frames = 0
-                    spawn_units(env, agents[0])
-                    timesteps = env.step(agent_actions, 2)
+                    if reset_between_episodes:
+                        if bridge:
+                            ep_num = (
+                                getattr(agents[0].ctx, "episode_count", env.total_episodes)
+                                if hasattr(agents[0], "ctx") and agents[0].ctx
+                                else env.total_episodes
+                            )
+                            bridge.put_event(
+                                {
+                                    "level": "warn",
+                                    "source": "game",
+                                    "message": f"Episode #{ep_num} 结束: Dogfall (超时, frame={total_frames})",
+                                }
+                            )
+                        if getattr(agents[0], "_done", False):
+                            if bridge:
+                                bridge.update_status(running=False, mode="completed")
+                            return
+                        break
+                    if force_initial_debug_spawn:
+                        timesteps = _reset_debug_spawn_verified(
+                            env,
+                            agents,
+                            timesteps,
+                            bridge=bridge,
+                            label="timeout",
+                        )
+                    elif validate_manual_spawn:
+                        timesteps = _reset_debug_spawn_verified(
+                            env,
+                            agents,
+                            timesteps,
+                            bridge=bridge,
+                            label="manual_spawn:timeout",
+                        )
+                    else:
+                        kill_all_units(env, timesteps[0].observation)
+                        spawn_units(env, agents[0])
+                        timesteps = env.step(agent_actions, 2)
                     env.total_episodes += 1
                     if bridge:
                         ep_num = (
@@ -354,7 +677,9 @@ def run_loop_custom(
                             }
                         )
                     if getattr(agents[0], "_done", False):
-                        break
+                        if bridge:
+                            bridge.update_status(running=False, mode="completed")
+                        return
                     continue
                 if max_frames and total_frames >= max_frames:
                     if bridge:
@@ -363,6 +688,20 @@ def run_loop_custom(
                 timesteps = env.step(agent_actions)
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        if bridge:
+            bridge.update_status(running=False, mode="error", error=str(e))
+            bridge.put_event(
+                {
+                    "level": "error",
+                    "source": "game",
+                    "message": f"运行异常: {e}",
+                }
+            )
+        raise
     finally:
         elapsed_time = time.time() - start_time
         if bridge:
@@ -406,6 +745,7 @@ def run_game(
     override_model_path: Optional[str] = None,
     cf_config: Optional[dict] = None,
     cf_runs: int = 1,
+    load_kg: bool = True,
 ):
     _apply_map_config(map_key)
     steps = _ENV_CONFIG["_MAX_STEP"]
@@ -530,7 +870,7 @@ def run_game(
         _kg = None
         _transitions = None
         _dist_matrix = None
-        if data_dir:
+        if data_dir and load_kg:
             from src import ROOT_DIR as _ROOT
             import pickle as _pickle
 
@@ -614,6 +954,8 @@ def run_game(
                             break
                         except Exception as e:
                             print(f"Warning: Failed to load sparse distance index: {e}")
+        elif data_dir and not load_kg:
+            print("[run_game] Skipping ETG/transitions/distance loading (load_kg=False)")
 
         agent1 = KGGuidedAgent(
             bridge=bridge,
@@ -674,6 +1016,15 @@ def run_game(
                 if max_episodes is not None
                 else _ENV_CONFIG["_MAX_EPISODE"],
                 bridge=bridge,
+                force_initial_debug_spawn=bool(
+                    (beam_params or {}).get("force_initial_debug_spawn", False)
+                ),
+                reset_between_episodes=bool(
+                    (beam_params or {}).get("reset_between_episodes", False)
+                ),
+                validate_manual_spawn=bool(
+                    (beam_params or {}).get("validate_manual_spawn", False)
+                ),
             )
             if bridge is None:
                 save_run(run_name)
