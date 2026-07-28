@@ -1,0 +1,9 @@
+unit_type,alliance,health,shield,energy,cargo_space_taken,build_progress,health_ratio,shield_ratio,energy_ratio,display_type,owner,x,y,facing,radius,cloak,is_selected,is_blip,is_powered,mineral_contents,vespene_contents,cargo_space_max,assigned_harvesters,ideal_harvesters,weapon_cooldown,order_length,order_id_0,order_id_1,tag,hallucination,buff_id_0,buff_id_1,addon_unit_type,active,is_on_screen,order_progress_0,order_progress_1,order_id_2,order_id_3,is_in_cargo,buff_duration_remain,buff_duration_max,attack_upgrade_level,armor_upgrade_level,shield_upgrade_level
+48,1,45,0,0,0,100,255,0,0,1,1,62,61,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4295229441,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,1,45,0,0,0,100,255,0,0,1,1,54,61,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4295753729,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,1,45,0,0,0,100,255,0,0,1,1,56,61,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4296015873,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,1,45,0,0,0,100,255,0,0,1,1,56,63,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4294967297,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,4,45,0,0,0,100,255,0,0,1,2,64,61,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4295491585,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,4,45,0,0,0,100,255,0,0,1,2,58,58,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4296802305,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,4,45,0,0,0,100,255,0,0,1,2,56,58,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4296540161,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+48,4,45,0,0,0,100,255,0,0,1,2,58,61,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,4296278017,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

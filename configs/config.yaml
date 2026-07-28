@@ -1,0 +1,10 @@
+defaults:
+  - model: decision_transformer
+  - env: starcraft
+  - experiment: default
+  - _self_
+
+seed: 42
+device: cuda
+
+mode: train

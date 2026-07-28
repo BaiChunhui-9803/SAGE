@@ -1,0 +1,14 @@
+# paths.yaml - 外部数据路径配置
+# 此文件包含机器特定的路径，不应提交到版本控制
+# 复制此文件为 paths.yaml 并根据您的环境修改
+
+# 数据根目录
+data_root: "D:/白春辉/实验平台/pymarl/results_HRL_new/Q-bktree"
+
+# 数据集标识
+map_id: "MarineMicro_MvsM_4"
+data_id: "6"
+
+# 输出目录
+output_dir: "output"
+cache_dir: "cache"

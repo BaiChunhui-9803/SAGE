@@ -1,0 +1,20 @@
+name: TrajectoryTransformer
+d_model: 128
+n_head: 4
+n_layer: 4
+max_len: 512
+dropout: 0.1
+
+training:
+  epochs: 20
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+
+params:
+  N: 10
+  K: 5
+  mdl_spatial_prior: false
+  mdl_init_embedding_freeze: false
+  mdl_init_embedding_train: false

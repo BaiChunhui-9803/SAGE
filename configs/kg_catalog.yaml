@@ -1,0 +1,86 @@
+knowledge_graphs:
+  # === MarineMicro_MvsM_4 (data_id=6) ===
+  - name: "MvsM4 - Simple"
+    file: "MarineMicro_MvsM_4/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_4/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4/6"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_4"
+    data_id: "6"
+    description: "MvsM4 (data_id=6) 纯状态模式"
+
+  - name: "MvsM4 - Context 5"
+    file: "MarineMicro_MvsM_4/kg_context_5.pkl"
+    transitions: "MarineMicro_MvsM_4/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4/6"
+    type: "context"
+    context_window: 5
+    map_id: "MarineMicro_MvsM_4"
+    data_id: "6"
+    description: "MvsM4 (data_id=6) 5步历史上下文"
+
+  - name: "MvsM4 - Context 10"
+    file: "MarineMicro_MvsM_4/kg_context_10.pkl"
+    transitions: "MarineMicro_MvsM_4/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4/6"
+    type: "context"
+    context_window: 10
+    map_id: "MarineMicro_MvsM_4"
+    data_id: "6"
+    description: "MvsM4 (data_id=6) 10步历史上下文"
+
+  # === MarineMicro_MvsM_4_mirror (data_id=3) ===
+  - name: "MvsM4-mirror - Simple"
+    file: "MarineMicro_MvsM_4_mirror/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_4_mirror/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4_mirror/3"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_4_mirror"
+    data_id: "3"
+    description: "MvsM4镜像 (data_id=3) 纯状态模式"
+
+  # === MarineMicro_MvsM_4_dist (data_id=1) ===
+  - name: "MvsM4-dist - Simple"
+    file: "MarineMicro_MvsM_4_dist/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_4_dist/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4_dist/1"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_4_dist"
+    data_id: "1"
+    description: "MvsM4-dist (data_id=1) 纯状态模式"
+
+  # === MarineMicro_MvsM_4_dist_mirror (data_id=3) ===
+  - name: "MvsM4-dist-mirror - Simple"
+    file: "MarineMicro_MvsM_4_dist_mirror/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_4_dist_mirror/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_4_dist_mirror/3"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_4_dist_mirror"
+    data_id: "3"
+    description: "MvsM4-dist镜像 (data_id=3) 纯状态模式"
+
+  # === MarineMicro_MvsM_8 (data_id=1) ===
+  - name: "MvsM8 - Simple"
+    file: "MarineMicro_MvsM_8/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_8/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_8/1"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_8"
+    data_id: "1"
+    description: "MvsM8 (data_id=1) 纯状态模式"
+
+  # === MarineMicro_MvsM_8_mirror (data_id=1) ===
+  - name: "MvsM8-mirror - Simple"
+    file: "MarineMicro_MvsM_8_mirror/kg_simple.pkl"
+    transitions: "MarineMicro_MvsM_8_mirror/kg_simple_transitions.pkl"
+    data_dir: "data/MarineMicro_MvsM_8_mirror/1"
+    type: "simple"
+    context_window: 0
+    map_id: "MarineMicro_MvsM_8_mirror"
+    data_id: "1"
+    description: "MvsM8镜像 (data_id=1) 纯状态模式"

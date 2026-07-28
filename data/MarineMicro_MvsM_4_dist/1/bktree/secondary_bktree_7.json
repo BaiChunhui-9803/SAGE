@@ -1,0 +1,14 @@
+{
+    "state": {
+        "red_army": [],
+        "blue_army": [
+            [
+                -0.1875,
+                -0.015625,
+                0.2
+            ]
+        ]
+    },
+    "cluster_id": 1,
+    "children": {}
+}

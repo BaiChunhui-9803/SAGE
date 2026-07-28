@@ -1,0 +1,16 @@
+name: default
+
+data:
+  map_id: "MarineMicro_MvsM_4"
+  data_id: "6"
+
+model:
+  name: "decisionTransformer"
+
+logging:
+  level: INFO
+  save_dir: "output/logs"
+
+checkpoint:
+  save_dir: "cache/model"
+  save_every: 10
