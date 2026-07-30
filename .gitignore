@@ -28,10 +28,19 @@ ENV/
 *.swo
 
 # Generated runtime artifacts and large research data.
-# Curated baseline artifacts are force-added deliberately at release time.
+# The six curated augmented ETGs below are the reproducibility artifacts used
+# by SAGE.  Everything else in these directories remains local-only.
 output/
-cache/
-data/
+cache/*
+!cache/knowledge_graph/
+!cache/knowledge_graph/*_augmented/
+!cache/knowledge_graph/*_augmented/**
+cache/knowledge_graph/*_augmented/npy/
+data/*
+!data/*/
+data/*/*
+!data/*/augmented_1/
+!data/*/augmented_1/**
 datas/
 backup/
 *.npy
@@ -89,10 +98,6 @@ scripts/select_*.py
 scripts/update_onpolicy_*.py
 scripts/validate_final_*.py
 scripts/visualize_planning_*.py
-scripts/run_adaptive_agent.py
-scripts/run_collect_data.py
-scripts/run_sc2_optimal_agent.py
-scripts/test_smart_agent.py
 
 # Machine-specific settings and OS files
 configs/paths.yaml
