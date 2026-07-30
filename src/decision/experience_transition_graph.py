@@ -12,14 +12,34 @@ Author: PredictionRTS Team
 Date: 2026-03-21
 """
 
-import pickle
 import logging
+import pickle
 from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
 from dataclasses import dataclass, field
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class _NumpyCompatibilityUnpickler(pickle.Unpickler):
+    """Load ETG artifacts written by either NumPy 1.x or NumPy 2.x.
+
+    NumPy 2 serializes some objects through ``numpy._core`` while NumPy 1.x
+    exposes the same implementation through ``numpy.core``.  ETG artifacts
+    are data-only, so remapping this module path is sufficient and avoids
+    forcing every Web user to upgrade NumPy just to inspect an artifact.
+    """
+
+    def find_class(self, module: str, name: str):
+        if module == "numpy._core" or module.startswith("numpy._core."):
+            module = "numpy.core" + module[len("numpy._core") :]
+        return super().find_class(module, name)
+
+
+def load_compatible_pickle(file_obj):
+    """Deserialize an ETG-related pickle across supported NumPy versions."""
+    return _NumpyCompatibilityUnpickler(file_obj).load()
 
 
 @dataclass
@@ -443,7 +463,7 @@ class DecisionExperienceTransitionGraph:
     def load(cls, path: str) -> "DecisionExperienceTransitionGraph":
         """Load experience transition graph from file"""
         with open(path, "rb") as f:
-            data = pickle.load(f)
+            data = load_compatible_pickle(f)
 
         ETG = cls(
             use_context=data["use_context"],

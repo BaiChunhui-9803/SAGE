@@ -7,7 +7,10 @@ import pickle
 import base64
 from etg_web.i18n import st
 import numpy as np
-from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
+from src.decision.experience_transition_graph import (
+    DecisionExperienceTransitionGraph,
+    load_compatible_pickle,
+)
 from src.decision.etg_beam_search import (
     plan_action,
     get_beam_paths,
@@ -40,7 +43,7 @@ def _cached_beam_results(
 ):
     ETG = DecisionExperienceTransitionGraph.load(str(etg_DIR / _etg_path))
     with open(str(etg_DIR / _trans_path), "rb") as f:
-        transitions = pickle.load(f)
+        transitions = load_compatible_pickle(f)
 
     plan = plan_action(
         ETG,

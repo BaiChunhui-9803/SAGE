@@ -6,7 +6,10 @@ import yaml
 import numpy as np
 
 from src import ROOT_DIR
-from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
+from src.decision.experience_transition_graph import (
+    DecisionExperienceTransitionGraph,
+    load_compatible_pickle,
+)
 
 from etg_web.constants import etg_DIR, NPY_DIR, DATA_DIR
 
@@ -33,7 +36,7 @@ def load_etg(etg_file: str) -> Tuple[Dict, float, float]:
         st.stop()
 
     with open(path, "rb") as f:
-        etg_data = pickle.load(f)
+        etg_data = load_compatible_pickle(f)
 
     quality_scores = [
         stats.quality_score
@@ -52,7 +55,7 @@ def load_transitions(transitions_file: str) -> Dict:
     if not path.exists():
         return {}
     with open(path, "rb") as f:
-        return pickle.load(f)
+        return load_compatible_pickle(f)
 
 
 @st.cache_resource

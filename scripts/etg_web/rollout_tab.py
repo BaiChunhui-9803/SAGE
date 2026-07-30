@@ -9,7 +9,10 @@ import base64
 from etg_web.i18n import st
 import numpy as np
 import plotly.graph_objects as go
-from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
+from src.decision.experience_transition_graph import (
+    DecisionExperienceTransitionGraph,
+    load_compatible_pickle,
+)
 from src.decision.etg_beam_search import (
     get_beam_paths,
     BeamSearchResult,
@@ -51,7 +54,7 @@ def _cached_rollout_results(
 ):
     ETG = DecisionExperienceTransitionGraph.load(str(etg_DIR / _etg_path))
     with open(str(etg_DIR / _trans_path), "rb") as f:
-        transitions = pickle.load(f)
+        transitions = load_compatible_pickle(f)
 
     dist_matrix = None
     if enable_backup:
