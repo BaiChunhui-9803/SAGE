@@ -56,14 +56,14 @@ def _game_worker(bridge, map_key, run_name, fallback_action):
         map_key=map_key,
         run_name=run_name,
         bridge=bridge,
-        agent_type="kg_guided",
+        agent_type="etg_guided",
         fallback_action=fallback_action,
     )
 
 
 logger = logging.getLogger(__name__)
 
-KG_DIR = ROOT_DIR / "cache" / "knowledge_graph"
+etg_DIR = ROOT_DIR / "cache" / "experience_transition_graph"
 
 _instance: Optional["BridgeServer"] = None
 
@@ -237,13 +237,13 @@ def _compute_deviations(events: List[Dict]) -> List[Dict]:
                 plan_step_idx = 0
                 plan_id_counter += 1
                 current_plan_start_idx = i
-        if et == "kg_follow" and current_planned_states:
+        if et == "etg_follow" and current_planned_states:
             idx_in_plan = plan_step_idx
             if idx_in_plan < len(current_planned_states) and actual_state is not None:
                 planned_state = current_planned_states[idx_in_plan]
                 deviation = _safe_dist(dm, dm_shape, actual_state, planned_state)
             plan_step_idx += 1
-        elif et == "kg_plan" and plan is None and current_planned_states:
+        elif et == "etg_plan" and plan is None and current_planned_states:
             plan_step_idx += 1
         if i > 0 and actual_state is not None and prev_prediction_error is None:
             prev_ev = events[i - 1]
@@ -265,10 +265,10 @@ def _compute_deviations(events: List[Dict]) -> List[Dict]:
         ev["plan_id"] = (
             plan_id_counter
             if plan is not None or current_planned_states
-            else (plan_id_counter if et == "kg_follow" else 0)
+            else (plan_id_counter if et == "etg_follow" else 0)
         )
         ev["plan_step_idx"] = (
-            plan_step_idx if (plan is not None or et == "kg_follow") else 0
+            plan_step_idx if (plan is not None or et == "etg_follow") else 0
         )
         ev["prediction_error"] = (
             float(prev_prediction_error) if prev_prediction_error is not None else None
@@ -447,10 +447,10 @@ def _build_fork_tree_data(events: List[Dict], dist_map: Dict) -> Optional[Dict]:
 class BridgeServer:
     def __init__(self, bridge: GameBridge):
         self.bridge = bridge
-        self.kg = None
+        self.ETG = None
         self.transitions = None
-        self.kg_loaded = False
-        self.kg_file: Optional[str] = None
+        self.etg_loaded = False
+        self.etg_file: Optional[str] = None
         self._state_id_map: Dict[Tuple[int, int], int] = {}
         self._local_status: Dict[str, Any] = {
             "running": False,
@@ -526,30 +526,30 @@ class BridgeServer:
         for upd in self.bridge.drain_status_updates():
             self._local_status.update(upd)
         result = {k: self._to_native(v) for k, v in self._local_status.items()}
-        result["kg_loaded"] = self.kg_loaded
-        result["kg_file"] = self.kg_file
+        result["etg_loaded"] = self.etg_loaded
+        result["etg_file"] = self.etg_file
         return result
 
-    def load_kg(self, kg_file: str, data_dir: Optional[str] = None) -> bool:
-        from src.decision.knowledge_graph import DecisionKnowledgeGraph
+    def load_etg(self, etg_file: str, data_dir: Optional[str] = None) -> bool:
+        from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
-        path = KG_DIR / kg_file
+        path = etg_DIR / etg_file
         if not path.exists():
-            logger.error(f"KG file not found: {path}")
+            logger.error(f"ETG file not found: {path}")
             return False
 
         try:
-            self.kg = DecisionKnowledgeGraph.load(str(path))
-            self.kg_file = kg_file
-            logger.info(f"Loaded KG from {path}")
+            self.ETG = DecisionExperienceTransitionGraph.load(str(path))
+            self.etg_file = etg_file
+            logger.info(f"Loaded ETG from {path}")
         except Exception as e:
-            logger.error(f"Failed to load KG: {e}")
+            logger.error(f"Failed to load ETG: {e}")
             return False
 
-        trans_file = kg_file.replace(".pkl", "_transitions.pkl")
+        trans_file = etg_file.replace(".pkl", "_transitions.pkl")
         if not trans_file.endswith(".pkl"):
-            trans_file = kg_file + "_transitions.pkl"
-        trans_path = KG_DIR / trans_file
+            trans_file = etg_file + "_transitions.pkl"
+        trans_path = etg_DIR / trans_file
         if trans_path.exists():
             try:
                 with open(trans_path, "rb") as f:
@@ -700,7 +700,7 @@ class BridgeServer:
             except Exception as e:
                 logger.warning(f"Failed to compute MDS coords: {e}")
 
-        self.kg_loaded = True
+        self.etg_loaded = True
         return True
 
     def _load_known_states(self, data_dir: str) -> None:
@@ -1042,10 +1042,10 @@ def create_app(bridge: GameBridge) -> FastAPI:
 
         status = _instance._refresh_status()
         mode = status.get("agent_mode", status.get("mode", "unknown"))
-        kg_file = status.get("kg_file", "")
+        etg_file = status.get("etg_file", "")
         map_id = "unknown"
-        if kg_file:
-            parts = Path(kg_file).parent.name
+        if etg_file:
+            parts = Path(etg_file).parent.name
             map_id = parts if parts else "unknown"
 
         all_ids = sorted(_instance._history_meta.keys())
@@ -1096,7 +1096,7 @@ def create_app(bridge: GameBridge) -> FastAPI:
             "metadata": {
                 "map_id": map_id,
                 "mode": mode,
-                "kg_file": kg_file,
+                "etg_file": etg_file,
                 "backup_enabled": backup_enabled,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "num_episodes": len(episodes),
@@ -1242,16 +1242,16 @@ def create_app(bridge: GameBridge) -> FastAPI:
             },
         )
 
-    @app.post("/game/load_kg")
-    async def load_kg(kg_file: str = Query(...), data_dir: Optional[str] = Query(None)):
-        success = _instance.load_kg(kg_file, data_dir=data_dir or None)
+    @app.post("/game/load_etg")
+    async def load_etg(etg_file: str = Query(...), data_dir: Optional[str] = Query(None)):
+        success = _instance.load_etg(etg_file, data_dir=data_dir or None)
         if not success:
-            raise HTTPException(status_code=400, detail="Failed to load KG file.")
-        return {"status": "loaded", "kg_file": kg_file}
+            raise HTTPException(status_code=400, detail="Failed to load ETG file.")
+        return {"status": "loaded", "etg_file": etg_file}
 
     @app.get("/game/actions")
     async def list_actions():
-        from src.sc2env.kg_guided_agent import ACTION_NAME_MAP, FALLBACK_ACTIONS
+        from src.sc2env.etg_guided_agent import ACTION_NAME_MAP, FALLBACK_ACTIONS
 
         return {
             "action_map": ACTION_NAME_MAP,
@@ -1365,12 +1365,12 @@ def run_server(
     bridge: GameBridge,
     host: str = "0.0.0.0",
     port: int = 8000,
-    kg_file: Optional[str] = None,
+    etg_file: Optional[str] = None,
     data_dir: Optional[str] = None,
 ):
     import uvicorn
 
     app = create_app(bridge)
-    if kg_file and _instance:
-        _instance.load_kg(kg_file, data_dir=data_dir)
+    if etg_file and _instance:
+        _instance.load_etg(etg_file, data_dir=data_dir)
     uvicorn.run(app, host=host, port=port, log_level="info")

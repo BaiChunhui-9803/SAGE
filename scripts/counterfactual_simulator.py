@@ -327,7 +327,7 @@ class CounterfactualSimulator:
                 hp_delta = frame.get("hp_delta", 0)
 
                 priority = 0
-                if action_source == "kg_plan" and hp_delta < -10:
+                if action_source == "etg_plan" and hp_delta < -10:
                     priority = 3
                 elif (
                     frame.get("my_count", 0) > frame.get("enemy_count", 0)
@@ -338,7 +338,7 @@ class CounterfactualSimulator:
                 elif action_source in (
                     "fallback",
                     "ft_plan",
-                    "kg_relaxed",
+                    "etg_relaxed",
                     "fuzzy_plan",
                 ):
                     priority = 1
@@ -453,8 +453,8 @@ class CounterfactualSimulator:
                 "--cf_runs",
                 str(cf_runs),
             ]
-            if game.get("kg_file"):
-                cmd.extend(["--kg_file", game["kg_file"]])
+            if game.get("etg_file"):
+                cmd.extend(["--etg_file", game["etg_file"]])
             if game.get("data_dir"):
                 cmd.extend(["--data_dir", game["data_dir"]])
 

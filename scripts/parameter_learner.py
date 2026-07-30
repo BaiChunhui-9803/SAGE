@@ -7,7 +7,7 @@ Parameter Learner — 基于贝叶斯优化的 Beam Search 参数自动寻优
 
 Usage:
     python scripts/parameter_learner.py --config configs/learner_config.yaml
-    python scripts/parameter_learner.py --trials 30 --episodes 50 --kg_file MarineMicro_MvsM_4_augmented/kg_simple.pkl
+    python scripts/parameter_learner.py --trials 30 --episodes 50 --etg_file MarineMicro_MvsM_4_augmented/etg_simple.pkl
 """
 
 import sys
@@ -34,7 +34,7 @@ optuna.logging.set_verbosity(optuna.logging.INFO)
 
 _DEFAULT_CONFIG = ROOT_DIR / "configs" / "learner_config.yaml"
 
-_ETG_PARAM_KEYS = (
+_etg_PARAM_KEYS = (
     "action_strategy",
     "mode",
     "beam_width",
@@ -553,7 +553,7 @@ class ParameterLearner:
                 raw_params = item.get("override")
             if not isinstance(raw_params, dict):
                 continue
-            params = {k: raw_params[k] for k in _ETG_PARAM_KEYS if k in raw_params}
+            params = {k: raw_params[k] for k in _etg_PARAM_KEYS if k in raw_params}
             if not params:
                 continue
             params["mode"] = "multi_step"
@@ -699,11 +699,11 @@ class ParameterLearner:
                 float(self._phase_cfg.get("exploration_min_rate", 0.20)),
             )
             phased["tuning_explore_sources"] = [
-                "kg_plan",
-                "kg_follow",
+                "etg_plan",
+                "etg_follow",
                 "fallback",
                 "ft_plan",
-                "kg_relaxed",
+                "etg_relaxed",
                 "fuzzy_plan",
                 "ood",
             ]
@@ -719,7 +719,7 @@ class ParameterLearner:
             phased["tuning_etg_protected_sources"] = list(
                 self._phase_cfg.get(
                     "synergy_etg_protected_sources",
-                    ["kg_plan", "kg_follow"],
+                    ["etg_plan", "etg_follow"],
                 )
                 or []
             )
@@ -733,7 +733,7 @@ class ParameterLearner:
             phased["tuning_validation_sources"] = list(
                 self._phase_cfg.get(
                     "synergy_validation_sources",
-                    ["ood", "fallback", "kg_relaxed"],
+                    ["ood", "fallback", "etg_relaxed"],
                 )
                 or []
             )
@@ -769,7 +769,7 @@ class ParameterLearner:
                             "min_advantage": 4.0,
                             "min_visits": 8,
                         },
-                        "kg_relaxed": {
+                        "etg_relaxed": {
                             "min_confidence": 0.45,
                             "min_advantage": 8.0,
                             "min_visits": 12,
@@ -823,7 +823,7 @@ class ParameterLearner:
             try:
                 data = json.loads(run_path.read_text(encoding="utf-8"))
                 params = data.get("params", {}) or {}
-                etg_params = {k: params[k] for k in _ETG_PARAM_KEYS if k in params}
+                etg_params = {k: params[k] for k in _etg_PARAM_KEYS if k in params}
                 pool_item = {
                     "trial": int(trial_number),
                     "value": float(value),
@@ -975,12 +975,12 @@ class ParameterLearner:
             "--autopilot_mode",
             game.get("autopilot_mode", "multi_step"),
         ]
-        if game.get("kg_file"):
-            cmd.extend(["--kg_file", game["kg_file"]])
+        if game.get("etg_file"):
+            cmd.extend(["--etg_file", game["etg_file"]])
         if game.get("data_dir"):
             cmd.extend(["--data_dir", game["data_dir"]])
-        if not bool(game.get("api_load_kg", False)):
-            cmd.append("--skip_api_kg")
+        if not bool(game.get("api_load_etg", False)):
+            cmd.append("--skip_api_etg")
         if game.get("fallback_action"):
             cmd.extend(["--fallback_action", game["fallback_action"]])
         if game.get("initial_beam_params_file"):
@@ -1108,26 +1108,26 @@ class ParameterLearner:
             _terminate_process_tree(self._current_proc)
             raise RuntimeError("game startup timeout")
 
-    def _load_kg(self):
+    def _load_etg(self):
         game = self.cfg.get("game", {})
-        kg_file = game.get("kg_file")
-        if not kg_file:
+        etg_file = game.get("etg_file")
+        if not etg_file:
             return
         port = self._port
         if not port:
             return
         try:
             requests.post(
-                f"http://127.0.0.1:{port}/game/load_kg",
+                f"http://127.0.0.1:{port}/game/load_etg",
                 params={
-                    "kg_file": kg_file,
+                    "etg_file": etg_file,
                     "data_dir": game.get("data_dir") or "",
                 },
                 timeout=30,
             )
-            print(f"  KG loaded: {kg_file}")
+            print(f"  ETG loaded: {etg_file}")
         except requests.RequestException as e:
-            print(f"  [WARN] KG load failed: {e}")
+            print(f"  [WARN] ETG load failed: {e}")
 
     def _run_finetune_phase(self, completed_trials: int, study):
         try:
@@ -1644,7 +1644,7 @@ def main():
     parser.add_argument("--trials", type=int, default=None, help="total trials")
     parser.add_argument("--episodes", type=int, default=None, help="episodes per trial")
     parser.add_argument("--map_key", default=None, help="Map config key")
-    parser.add_argument("--kg_file", default=None, help="KG pickle file")
+    parser.add_argument("--etg_file", default=None, help="ETG pickle file")
     parser.add_argument("--data_dir", default=None, help="data dir")
     parser.add_argument("--resume", action="store_true", help="resume from last")
     parser.add_argument(
@@ -1715,8 +1715,8 @@ def main():
         cfg["execution"]["episodes_per_trial"] = args.episodes
     if args.map_key is not None:
         cfg.setdefault("game", {})["map_key"] = args.map_key
-    if args.kg_file is not None:
-        cfg.setdefault("game", {})["kg_file"] = args.kg_file
+    if args.etg_file is not None:
+        cfg.setdefault("game", {})["etg_file"] = args.etg_file
     if args.data_dir is not None:
         cfg.setdefault("game", {})["data_dir"] = args.data_dir
     if args.restart_interval is not None:
@@ -1753,7 +1753,7 @@ def main():
     print(f"  config: {args.config}")
     print(f"  total trials: {cfg['execution']['total_trials']}")
     print(f"  episodes/trial: {cfg['execution']['episodes_per_trial']}")
-    print(f"  KG file: {cfg['game'].get('kg_file', '(auto)')}")
+    print(f"  ETG file: {cfg['game'].get('etg_file', '(auto)')}")
     print(f"  data dir: {cfg['game'].get('data_dir', '(auto)')}")
     print(f"  restart interval: {cfg['execution'].get('restart_interval', 0)} trials")
     print(

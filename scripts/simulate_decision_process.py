@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """
-Simulate Decision Process with Knowledge Graph
+Simulate Decision Process with Experience Transition Graph
 
-This script simulates decision making using the knowledge graph's state transition network.
+This script simulates decision making using the experience transition graph's state transition network.
 Starting from state 0, it uses roulette wheel selection to choose actions and follows
 the transitions to see if it can reach a winning state.
 
 Usage:
-    python scripts/simulate_decision_process.py --kg-type simple --episodes 100
-    python scripts/simulate_decision_process.py --kg-type context --context-window 5 --verbose
+    python scripts/simulate_decision_process.py --etg-type simple --episodes 100
+    python scripts/simulate_decision_process.py --etg-type context --context-window 5 --verbose
 
 Author: PredictionRTS Team
 Date: 2026-03-21
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src import get_config, set_seed, ROOT_DIR
 from src.data.loader import DataLoader
-from src.decision.knowledge_graph import DecisionKnowledgeGraph
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -35,21 +35,21 @@ logger = logging.getLogger(__name__)
 
 class StateTransitionSimulator:
     """
-    Simulates decision process using knowledge graph
+    Simulates decision process using experience transition graph
 
     Uses roulette wheel selection based on action quality scores
     """
 
-    def __init__(self, kg: DecisionKnowledgeGraph, verbose: bool = False):
-        self.kg = kg
+    def __init__(self, ETG: DecisionExperienceTransitionGraph, verbose: bool = False):
+        self.ETG = ETG
         self.verbose = verbose
 
-        # Build state transition network from knowledge graph
+        # Build state transition network from experience transition graph
         self.transitions = self._build_transitions()
 
     def _build_transitions(self) -> dict:
         """
-        Build state transition network from knowledge graph
+        Build state transition network from experience transition graph
 
         Returns:
             transitions[state][action] = {
@@ -119,8 +119,8 @@ class StateTransitionSimulator:
                 trans = transitions[state][action]
                 trans["next_states"] = dict(trans["next_states"])
 
-                # Get quality from knowledge graph
-                quality = self.kg.get_action_quality(state, action)
+                # Get quality from experience transition graph
+                quality = self.ETG.get_action_quality(state, action)
                 if quality:
                     trans["quality_score"] = quality["quality_score"]
                     trans["win_rate"] = quality["win_rate"]
@@ -214,8 +214,8 @@ class StateTransitionSimulator:
         state = start_state
 
         for step in range(max_steps):
-            # Get top-k actions from knowledge graph
-            top_actions = self.kg.get_top_k_actions(
+            # Get top-k actions from experience transition graph
+            top_actions = self.ETG.get_top_k_actions(
                 state=state, k=top_k, metric="quality_score", min_visits=1
             )
 
@@ -319,7 +319,7 @@ class StateTransitionSimulator:
 def main():
     parser = argparse.ArgumentParser(description="Simulate decision process")
     parser.add_argument(
-        "--kg-type", type=str, default="simple", choices=["simple", "context"]
+        "--etg-type", type=str, default="simple", choices=["simple", "context"]
     )
     parser.add_argument("--context-window", type=int, default=5)
     parser.add_argument("--episodes", type=int, default=100)
@@ -344,24 +344,24 @@ def main():
 
     set_seed(args.seed)
 
-    # Load knowledge graph
-    kg_dir = ROOT_DIR / "cache" / "knowledge_graph"
-    if args.kg_type == "simple":
-        kg_path = kg_dir / "kg_simple.pkl"
+    # Load experience transition graph
+    etg_dir = ROOT_DIR / "cache" / "experience_transition_graph"
+    if args.etg_type == "simple":
+        etg_path = etg_dir / "etg_simple.pkl"
     else:
-        kg_path = kg_dir / f"kg_context_{args.context_window}.pkl"
+        etg_path = etg_dir / f"etg_context_{args.context_window}.pkl"
 
-    if not kg_path.exists():
-        logger.error(f"Knowledge graph not found: {kg_path}")
-        logger.error("Please run: python scripts/build_knowledge_graph.py")
+    if not etg_path.exists():
+        logger.error(f"Experience Transition Graph not found: {etg_path}")
+        logger.error("Please run: python scripts/build_experience_transition_graph.py")
         return
 
-    kg = DecisionKnowledgeGraph.load(str(kg_path))
-    logger.info(f"Loaded knowledge graph from {kg_path}")
+    ETG = DecisionExperienceTransitionGraph.load(str(etg_path))
+    logger.info(f"Loaded experience transition graph from {etg_path}")
 
     # Create simulator
     logger.info("Building state transition network...")
-    simulator = StateTransitionSimulator(kg, verbose=args.verbose)
+    simulator = StateTransitionSimulator(ETG, verbose=args.verbose)
 
     logger.info(
         f"State transition network built with {len(simulator.transitions)} states"
@@ -383,7 +383,7 @@ def main():
     print("       SIMULATION RESULTS")
     print("=" * 60)
     print()
-    print(f"Knowledge Graph: {args.kg_type}")
+    print(f"Experience Transition Graph: {args.etg_type}")
     print(f"Episodes: {results['num_episodes']}")
     print(f"Start State: {args.start_state}")
     print()

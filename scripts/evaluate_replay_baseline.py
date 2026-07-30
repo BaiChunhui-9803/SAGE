@@ -563,8 +563,8 @@ def _run_sequence(
         str(sequence_index),
         "--plan_log_path",
         str(seq_dir / "plan.log"),
-        "--skip_api_kg",
-        "--skip_game_kg",
+        "--skip_api_etg",
+        "--skip_game_etg",
         "--primary_threshold",
         str(float(args.primary_threshold)),
         "--secondary_threshold",
@@ -819,7 +819,7 @@ def _run_replay_collector_eval(
         str(float(args.primary_threshold)),
         "--secondary_threshold",
         str(float(args.secondary_threshold)),
-        "--skip_api_kg",
+        "--skip_api_etg",
     ]
 
     flags = 0
@@ -902,8 +902,8 @@ def _build_manifest(args: argparse.Namespace, exp_dir: Path, selected: List[Dict
         "map_id": args.map_id,
         "experiment_type": "historical_replay_baseline",
         "method": "Historical Action Replay",
-        "kg_name": args.kg_name or "",
-        "kg_file": args.kg_file or "",
+        "etg_name": args.etg_name or "",
+        "etg_file": args.etg_file or "",
         "transitions": args.transitions or "",
         "data_dir": args.data_dir or "",
         "dataset_type": args.dataset_type,
@@ -990,7 +990,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "experiment_type": "historical_replay_baseline",
         "map_key": args.map_key,
         "map_id": args.map_id,
-        "kg_file": args.kg_file or "",
+        "etg_file": args.etg_file or "",
         "data_dir": args.data_dir or "",
         "episodes_per_repeat": int(args.episodes),
         "requested_repeats": 1,
@@ -1066,8 +1066,8 @@ def main() -> None:
     parser.add_argument("--method-group", default=_METHOD_GROUP, help="Archive method group")
     parser.add_argument("--config", default=str(_DEFAULT_CONFIG), help="Base learner config for timeouts/objective")
     parser.add_argument("--timeout-minutes", type=int, default=90, help="Timeout per selected sequence")
-    parser.add_argument("--kg-name", default="", help="Scenario ETG label for manifest only")
-    parser.add_argument("--kg-file", default="", help="Scenario ETG file for manifest only")
+    parser.add_argument("--etg-name", default="", help="Scenario ETG label for manifest only")
+    parser.add_argument("--etg-file", default="", help="Scenario ETG file for manifest only")
     parser.add_argument("--transitions", default="", help="Scenario transition file for manifest only")
     parser.add_argument("--data-dir", default="", help="Scenario data directory for BKTree/action resolution")
     parser.add_argument("--dataset-type", default="historical", help="Dataset type label")

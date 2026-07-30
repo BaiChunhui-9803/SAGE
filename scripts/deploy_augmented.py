@@ -5,7 +5,7 @@ Deploy augmented ETG data to system standard paths.
 Usage:
     python scripts/deploy_augmented.py \
         --collected-dir output/collected_data/ep0-3999_r10_p0.7_s0.5 \
-        --kg-dir cache/knowledge_graph/MarineMicro_MvsM_4_augmented \
+        --etg-dir cache/experience_transition_graph/MarineMicro_MvsM_4_augmented \
         --map-id MarineMicro_MvsM_4 --data-id augmented_1
 
 Copies:
@@ -51,48 +51,48 @@ def deploy_bktree(collected_dir: Path, dest_dir: Path):
     logger.info(f"  {count} secondary_bktree_*.json -> {dest_dir}")
 
 
-def deploy_state_node(kg_dir: Path, dest_path: Path):
-    src = kg_dir / "state_node.txt"
+def deploy_state_node(etg_dir: Path, dest_path: Path):
+    src = etg_dir / "state_node.txt"
     if src.exists():
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest_path)
         logger.info(f"  state_node.txt -> {dest_path}")
     else:
-        logger.warning(f"  state_node.txt not found in {kg_dir}")
+        logger.warning(f"  state_node.txt not found in {etg_dir}")
 
 
-def deploy_dist_matrix(kg_dir: Path, dest_path: Path):
-    src = kg_dir / "npy" / "state_distance_matrix.npy"
+def deploy_dist_matrix(etg_dir: Path, dest_path: Path):
+    src = etg_dir / "npy" / "state_distance_matrix.npy"
     if not src.exists():
-        logger.warning(f"  state_distance_matrix.npy not found in {kg_dir / 'npy'}")
+        logger.warning(f"  state_distance_matrix.npy not found in {etg_dir / 'npy'}")
         return
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_path)
     logger.info(f"  state_distance_matrix.npy -> {dest_path}")
 
 
-def deploy_sparse_neighbors(kg_dir: Path, dest_path: Path):
+def deploy_sparse_neighbors(etg_dir: Path, dest_path: Path):
     candidates = [
-        kg_dir / "sparse_neighbors.pkl",
-        kg_dir / "npy" / "sparse_neighbors.pkl",
+        etg_dir / "sparse_neighbors.pkl",
+        etg_dir / "npy" / "sparse_neighbors.pkl",
     ]
     src = next((p for p in candidates if p.exists()), None)
     if src is None:
-        logger.warning(f"  sparse_neighbors.pkl not found in {kg_dir}")
+        logger.warning(f"  sparse_neighbors.pkl not found in {etg_dir}")
         return
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_path)
     logger.info(f"  sparse_neighbors.pkl -> {dest_path}")
 
 
-def deploy_data_dir(collected_dir: Path, kg_dir: Path, map_id: str, data_id: str):
+def deploy_data_dir(collected_dir: Path, etg_dir: Path, map_id: str, data_id: str):
     data_dir = BASE_DIR / "data" / map_id / data_id
     bktree_dest = data_dir / "bktree"
     state_node_dest = data_dir / "graph" / "state_node.txt"
 
     logger.info(f"Deploying data_dir structure: {data_dir}")
     deploy_bktree(collected_dir, bktree_dest)
-    deploy_state_node(kg_dir, state_node_dest)
+    deploy_state_node(etg_dir, state_node_dest)
 
 
 def main():
@@ -105,9 +105,9 @@ def main():
         help="Collected data directory containing BKTree JSON files",
     )
     parser.add_argument(
-        "--kg-dir",
+        "--etg-dir",
         required=True,
-        help="KG build output directory (contains state_node.txt, npy/)",
+        help="ETG build output directory (contains state_node.txt, npy/)",
     )
     parser.add_argument(
         "--map-id",
@@ -127,13 +127,13 @@ def main():
     args = parser.parse_args()
 
     collected_dir = Path(args.collected_dir)
-    kg_dir = Path(args.kg_dir)
+    etg_dir = Path(args.etg_dir)
 
     if not collected_dir.exists():
         logger.error(f"Collected dir not found: {collected_dir}")
         sys.exit(1)
-    if not kg_dir.exists():
-        logger.error(f"KG dir not found: {kg_dir}")
+    if not etg_dir.exists():
+        logger.error(f"ETG dir not found: {etg_dir}")
         sys.exit(1)
 
     bktree_dest = BASE_DIR / "datas" / "data_for_transit" / "bktree_augmented"
@@ -156,7 +156,7 @@ def main():
     logger.info("=" * 50)
     logger.info("DEPLOY AUGMENTED ETG")
     logger.info(f"  Collected dir : {collected_dir}")
-    logger.info(f"  KG dir        : {kg_dir}")
+    logger.info(f"  ETG dir        : {etg_dir}")
     logger.info("=" * 50)
 
     if args.dry_run:
@@ -172,20 +172,20 @@ def main():
     deploy_bktree(collected_dir, bktree_dest)
 
     logger.info("Deploying state_node.txt...")
-    deploy_state_node(kg_dir, state_node_dest)
+    deploy_state_node(etg_dir, state_node_dest)
 
     logger.info("Deploying distance matrix...")
-    deploy_dist_matrix(kg_dir, dist_matrix_dest)
+    deploy_dist_matrix(etg_dir, dist_matrix_dest)
 
     logger.info("Deploying sparse neighbor index...")
-    deploy_sparse_neighbors(kg_dir, sparse_neighbors_dest)
+    deploy_sparse_neighbors(etg_dir, sparse_neighbors_dest)
 
     logger.info("Deploying data_dir structure...")
-    deploy_data_dir(collected_dir, kg_dir, args.map_id, args.data_id)
+    deploy_data_dir(collected_dir, etg_dir, args.map_id, args.data_id)
 
     logger.info("=" * 50)
     logger.info("DEPLOY COMPLETE")
-    logger.info(f"  data_dir for kg_catalog.yaml: data/{args.map_id}/{args.data_id}")
+    logger.info(f"  data_dir for etg_catalog.yaml: data/{args.map_id}/{args.data_id}")
 
 
 if __name__ == "__main__":

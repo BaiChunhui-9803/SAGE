@@ -32,10 +32,10 @@ ENV/
 # by SAGE.  Everything else in these directories remains local-only.
 output/
 cache/*
-!cache/knowledge_graph/
-!cache/knowledge_graph/*_augmented/
-!cache/knowledge_graph/*_augmented/**
-cache/knowledge_graph/*_augmented/npy/
+!cache/experience_transition_graph/
+!cache/experience_transition_graph/*_augmented/
+!cache/experience_transition_graph/*_augmented/**
+cache/experience_transition_graph/*_augmented/npy/
 data/*
 !data/*/
 data/*/*
@@ -79,8 +79,8 @@ scripts/build_zotero_*.py
 scripts/generate_zotero_*.py
 scripts/llm_refine_*.py
 scripts/state_landscape/
-scripts/kg_web/*_plan.md
-scripts/kg_web/*_refactor.md
+scripts/etg_web/*_plan.md
+scripts/etg_web/*_refactor.md
 
 # One-off experiment orchestration kept outside the public release
 scripts/annotate_*.py

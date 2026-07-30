@@ -1,6 +1,6 @@
 # PredictionRTS 项目架构与研究动机
 
-> 当前文档按 2026-05-08 的实现状态重写。项目主线已经不再只是“ETG + Beam Search 的离线图规划系统”，而是一个围绕 **ETG/BKTree 基线知识、在线参数寻优、蒙特卡洛动作微调、OOD 状态处理与可视化诊断** 共同构成的 RTS 微操决策实验平台。
+> 当前文档按 2026-05-08 的实现状态重写。项目主线已经不再只是“ETG + Beam Search 的离线图规划系统”，而是一个围绕 **etg/BKTree 基线知识、在线参数寻优、蒙特卡洛动作微调、OOD 状态处理与可视化诊断** 共同构成的 RTS 微操决策实验平台。
 
 ---
 
@@ -15,7 +15,7 @@ PredictionRTS 面向 StarCraft II 微操场景，核心问题是：
 1. 用 BKTree 将连续战斗状态压缩为离散状态簇。
 2. 用 ETG（Experience Transition Graph）统计历史状态-动作-转移经验。
 3. 在 ETG 上执行 Beam Search，得到可解释的规划动作。
-4. 当 ETG/BKTree 覆盖不足、NID 映射不可靠、或动作置信度不足时，引入独立的蒙特卡洛动作微调模型。
+4. 当 etg/BKTree 覆盖不足、NID 映射不可靠、或动作置信度不足时，引入独立的蒙特卡洛动作微调模型。
 5. 用参数寻优、分阶段实验和可视化日志判断 ETG 与探索微调是否真正协同。
 
 ---
@@ -64,12 +64,12 @@ ETG 与 Beam Search 是对上述问题的折中：
 - ETG 把历史轨迹压缩为显式的状态-动作-转移图，保留访问次数、胜率、质量分数和未来奖励等统计量。
 - BKTree 提供从连续状态到离散图节点的索引，使实时 observation 可以映射到历史经验空间。
 - Beam Search 在 ETG 上做有限深度前向规划，避免完全短视地只看当前动作统计。
-- 相比端到端策略，ETG/Beam Search 更可解释：每个动作都能追溯到候选路径、转移概率和统计依据。
-- 相比 MCTS，ETG/Beam Search 不需要在线真实模拟大量分支，而是复用离线经验图。
+- 相比端到端策略，etg/Beam Search 更可解释：每个动作都能追溯到候选路径、转移概率和统计依据。
+- 相比 MCTS，etg/Beam Search 不需要在线真实模拟大量分支，而是复用离线经验图。
 
-因此，本项目首先以 ETG/BKTree/Beam Search 构建稳定、可解释的经验规划基线。但这只是基线，不是终点。由于 ETG 的经验来自有限历史数据，它仍会受到覆盖不足、长尾统计和错误状态映射的限制，这正是后续引入严格 NID、OOD 通道和动作微调模型的原因。
+因此，本项目首先以 etg/BKTree/Beam Search 构建稳定、可解释的经验规划基线。但这只是基线，不是终点。由于 ETG 的经验来自有限历史数据，它仍会受到覆盖不足、长尾统计和错误状态映射的限制，这正是后续引入严格 NID、OOD 通道和动作微调模型的原因。
 
-### 2.4 单纯 ETG/Beam Search 的局限
+### 2.4 单纯 etg/Beam Search 的局限
 
 ETG 的优势是可解释、可复现、能利用历史轨迹统计。但在当前微操场景中，它面临几个结构性问题：
 
@@ -92,9 +92,9 @@ ETG 的优势是可解释、可复现、能利用历史轨迹统计。但在当�
 
 本项目当前追求的不是“完全替代 ETG”，而是：
 
-> 保留 ETG/BKTree 作为可解释经验基线，在其不可靠或低置信时，通过独立动作微调模型进行受控探索与修正，并用严格日志和分阶段实验判断二者是否互相促进。
+> 保留 etg/BKTree 作为可解释经验基线，在其不可靠或低置信时，通过独立动作微调模型进行受控探索与修正，并用严格日志和分阶段实验判断二者是否互相促进。
 
-因此，动作微调模型默认不直接改写原始 ETG/BKTree；增量层也以 delta 的形式独立保存，避免污染离线基线。
+因此，动作微调模型默认不直接改写原始 etg/BKTree；增量层也以 delta 的形式独立保存，避免污染离线基线。
 
 ---
 
@@ -107,7 +107,7 @@ ETG 的优势是可解释、可复现、能利用历史轨迹统计。但在当�
 | 经验长尾 | ETG 中大量低访问边统计不可信 | `min_visits`、Beam Search 过滤、fallback、动作微调补充 |
 | 奖励延迟 | 最终奖励要 episode 结束才能准确得到 | `ActionTuningModel.update_episode()` 使用蒙特卡洛回报反向更新 |
 | 探索污染 | 低分/高 OOD episode 可能污染模型 | RestartGuard、warm-up、跳过更新、OOD 探索熔断 |
-| 协同归因 | 优化曲线混合 ETG 参数与动作探索效果 | 分阶段优化、动作来源占比、ETG/探索平衡曲线、候选表 |
+| 协同归因 | 优化曲线混合 ETG 参数与动作探索效果 | 分阶段优化、动作来源占比、etg/探索平衡曲线、候选表 |
 | 运行一致性 | SC2 重启、参数热更新、阈值不一致会造成实验漂移 | 阶段切换重启；BKTree 阈值侧边栏配置并传递到运行期 |
 | 可解释性 | 需要知道每一步动作来自 ETG、fallback、探索还是 tuning | `action_source`、`nid_status`、`action_tuning`、phase 日志字段 |
 
@@ -121,7 +121,7 @@ flowchart TB
         A["历史轨迹 / 回放 / RL 数据"]
         B["BKTree 状态聚类<br/>primary + secondary"]
         C["state_node.txt<br/>(p,s) -> nid"]
-        D["ETG 构建<br/>DecisionKnowledgeGraph"]
+        D["ETG 构建<br/>DecisionExperienceTransitionGraph"]
         E["transitions.pkl<br/>状态转移统计"]
         A --> B --> C --> D --> E
     end
@@ -202,11 +202,11 @@ MarineMicro_MvsM_4:
   secondary_threshold = 0.5
 ```
 
-这些默认值集中定义在 `scripts/kg_web/constants.py`，并在实时对局、重采样扩张、参数寻优侧边栏中可修改。
+这些默认值集中定义在 `scripts/etg_web/constants.py`，并在实时对局、重采样扩张、参数寻优侧边栏中可修改。
 
 ### 5.3 NID 解析状态
 
-当前 `KGGuidedAgent` 不再把所有最近邻都强行当成可靠 nid，而是记录解析质量：
+当前 `ETGGuidedAgent` 不再把所有最近邻都强行当成可靠 nid，而是记录解析质量：
 
 | 状态 | 含义 | 决策影响 |
 |---|---|---|
@@ -272,7 +272,7 @@ data/{map_id}/{data_id}/
 
 ### 6.2 ETG 构建
 
-`DecisionKnowledgeGraph` 聚合历史轨迹中的：
+`DecisionExperienceTransitionGraph` 聚合历史轨迹中的：
 
 - `visits`
 - `win_rate`
@@ -284,8 +284,8 @@ data/{map_id}/{data_id}/
 主要产物：
 
 ```text
-cache/knowledge_graph/{kg_name}/kg_simple.pkl
-cache/knowledge_graph/{kg_name}/kg_simple_transitions.pkl
+cache/experience_transition_graph/{etg_name}/etg_simple.pkl
+cache/experience_transition_graph/{etg_name}/etg_simple_transitions.pkl
 cache/npy/state_distance_matrix_{map_id}_{data_id}.npy
 ```
 
@@ -304,23 +304,23 @@ cache/npy/state_distance_matrix_{map_id}_{data_id}.npy
 ```bash
 python scripts/run_live_game.py --mode all \
   --map_key sce-1 \
-  --kg_file MarineMicro_MvsM_4_augmented/kg_simple.pkl \
+  --etg_file MarineMicro_MvsM_4_augmented/etg_simple.pkl \
   --data_dir data/MarineMicro_MvsM_4/augmented_1
 ```
 
 `run_live_game.py` 会启动：
 
 1. SC2 游戏进程。
-2. `KGGuidedAgent`。
+2. `ETGGuidedAgent`。
 3. FastAPI bridge server。
 
 Web 入口：
 
 ```bash
-streamlit run scripts/visualize_kg_web.py
+streamlit run scripts/visualize_etg_web.py
 ```
 
-### 7.2 KGGuidedAgent 决策步骤
+### 7.2 ETGGuidedAgent 决策步骤
 
 每一帧核心流程：
 
@@ -346,14 +346,14 @@ streamlit run scripts/visualize_kg_web.py
 
 | 来源 | 含义 |
 |---|---|
-| `kg_plan` | ETG/Beam Search 新规划 |
-| `kg_follow` | 跟随已有规划 |
-| `kg_relaxed` | 放宽条件后的 ETG 规划 |
+| `etg_plan` | etg/Beam Search 新规划 |
+| `etg_follow` | 跟随已有规划 |
+| `etg_relaxed` | 放宽条件后的 ETG 规划 |
 | `diverge` | 当前状态偏离计划后的重规划 |
 | `fallback` | 安全回退动作 |
 | `mc_explore` | 动作微调模型的 UCB 主动探索 |
 | `tuning` | 动作微调模型基于置信度接受替代动作 |
-| `ood` | ETG/BKTree 外状态的基础 OOD 通道 |
+| `ood` | etg/BKTree 外状态的基础 OOD 通道 |
 | `ood_mc_explore` | OOD 状态中的 UCB 探索 |
 | `ood_tuning` | OOD 状态中的 tuning 替代 |
 | `terminal_fix` | 终局兜底动作 |
@@ -431,7 +431,7 @@ else:
        保持 ETG
 ```
 
-对 OOD/fallback/kg_relaxed 等低置信来源，可使用更低的 validation gate。
+对 OOD/fallback/etg_relaxed 等低置信来源，可使用更低的 validation gate。
 
 ### 9.4 回报更新
 
@@ -477,9 +477,9 @@ ood:{p}:{s}:{digest}:d{distance}
 
 ### 10.2 OOD 决策含义
 
-OOD 不代表“状态无价值”，而代表“不能安全使用原 ETG nid”。高分 OOD episode 反而可能是重要候选，说明当前 ETG/BKTree 覆盖存在缺口。
+OOD 不代表“状态无价值”，而代表“不能安全使用原 ETG nid”。高分 OOD episode 反而可能是重要候选，说明当前 etg/BKTree 覆盖存在缺口。
 
-因此 Web 中保留高分 OOD 状态候选表，用于后续判断是否应进入增量层或重建 BKTree/ETG。
+因此 Web 中保留高分 OOD 状态候选表，用于后续判断是否应进入增量层或重建 BKTree/etg。
 
 ---
 
@@ -519,7 +519,7 @@ output/learner_results/training_runs/run_xxxx/incremental_layer/
 
 设计原则：
 
-- 不直接改写原始 ETG/BKTree。
+- 不直接改写原始 etg/BKTree。
 - 将新探索到的状态转移写入 delta。
 - 后续可选择是否合并进规划视图。
 
@@ -570,7 +570,7 @@ penalty_factor = max(1 - alpha * min(stability / cap, 1), 0)
 
 | 阶段 | 目的 | 典型行为 |
 |---|---|---|
-| `etg_only` | 搜索较好的 ETG/Beam 参数 | 不启用主动动作探索 |
+| `etg_only` | 搜索较好的 etg/Beam 参数 | 不启用主动动作探索 |
 | `exploration_only` | 单独训练动作微调模型 | 不作为参数优化目标，主要收集动作回报 |
 | `synergy` | ETG 与 tuning 协同 | 使用较优 ETG 参数池，低置信/OOD/fallback 场景由 tuning 验证 |
 
@@ -587,7 +587,7 @@ Synergy 阶段不应盲目主动探索，而应更接近：
 
 ```text
 ETG 给出主决策
-if OOD / fallback / kg_relaxed / low confidence:
+if OOD / fallback / etg_relaxed / low confidence:
     使用动作微调模型进行 gated correction
 else:
     保持 ETG
@@ -602,7 +602,7 @@ else:
 Web 入口：
 
 ```bash
-streamlit run scripts/visualize_kg_web.py
+streamlit run scripts/visualize_etg_web.py
 ```
 
 主要视图：
@@ -621,7 +621,7 @@ streamlit run scripts/visualize_kg_web.py
 
 - 优化目标值曲线。
 - ETG 利用与探索微调平衡曲线。
-- 动作来源占比：`kg_plan / kg_relaxed / mc_explore / tuning / ood / fallback`。
+- 动作来源占比：`etg_plan / etg_relaxed / mc_explore / tuning / ood / fallback`。
 - NID 解析质量：`exact / near_valid / rejected / OOD total`。
 - RestartGuard 触发趋势。
 - 高分 OOD 状态候选表。
@@ -680,8 +680,8 @@ plan.action_tuning
 
 | 文件 | 作用 |
 |---|---|
-| `src/decision/knowledge_graph.py` | ETG 数据结构、ActionStats、保存加载 |
-| `src/decision/kg_beam_search.py` | ETG 上的 Beam Search |
+| `src/decision/experience_transition_graph.py` | ETG 数据结构、ActionStats、保存加载 |
+| `src/decision/etg_beam_search.py` | ETG 上的 Beam Search |
 | `src/decision/chain_rollout.py` | 多步滚动推演和 backup switch |
 | `src/decision/action_tuning_model.py` | 蒙特卡洛动作微调模型 |
 | `src/decision/incremental_layer.py` | 增量 delta 层 |
@@ -700,7 +700,7 @@ plan.action_tuning
 | 文件 | 作用 |
 |---|---|
 | `src/sc2env/agent.py` | 基础 SmartAgent、动作执行、状态聚类基础逻辑 |
-| `src/sc2env/kg_guided_agent.py` | 当前主 Agent：ETG、NID、OOD、tuning、incremental、日志 |
+| `src/sc2env/etg_guided_agent.py` | 当前主 Agent：ETG、NID、OOD、tuning、incremental、日志 |
 | `src/sc2env/run_game.py` | SC2 环境启动和 Agent 装配 |
 | `src/sc2env/bridge.py` | 游戏进程与 API 进程通信 |
 | `src/sc2env/bridge_server.py` | FastAPI 控制与结果保存 |
@@ -712,17 +712,17 @@ plan.action_tuning
 |---|---|
 | `scripts/parameter_learner.py` | Optuna 参数寻优、阶段调度、trial 管理 |
 | `scripts/run_live_game.py` | 实时对局启动器 |
-| `scripts/build_from_collected.py` | 从重采样数据构建 ETG/BKTree 相关产物 |
-| `scripts/build_knowledge_graph.py` | 从已有数据构建 ETG |
-| `scripts/kg_web/learner_tab.py` | 参数寻优和动作微调可视化主界面 |
-| `scripts/kg_web/live_game_tab.py` | 实时对局和重采样扩张界面 |
-| `scripts/kg_web/constants.py` | Web 常量、BKTree 默认阈值 |
+| `scripts/build_from_collected.py` | 从重采样数据构建 etg/BKTree 相关产物 |
+| `scripts/build_experience_transition_graph.py` | 从已有数据构建 ETG |
+| `scripts/etg_web/learner_tab.py` | 参数寻优和动作微调可视化主界面 |
+| `scripts/etg_web/live_game_tab.py` | 实时对局和重采样扩张界面 |
+| `scripts/etg_web/constants.py` | Web 常量、BKTree 默认阈值 |
 
 ### 16.5 配置
 
 | 文件 | 作用 |
 |---|---|
-| `configs/kg_catalog.yaml` | KG/数据集目录 |
+| `configs/etg_catalog.yaml` | etg/数据集目录 |
 | `configs/learner_config.yaml` | 参数寻优、动作微调、增量层、阶段优化配置 |
 | `configs/paths.yaml.example` | 路径示例 |
 
@@ -798,7 +798,7 @@ incremental_layer:
    需要检查较优 ETG 参数池、tuning 模型加载、阶段切换重启、探索率、validation gate 是否一致生效。
 
 4. **OOD 是风险还是机会**  
-   高 OOD 不一定是坏事。高分 OOD 状态可能说明 ETG/BKTree 需要增量扩展；低分高 OOD 则可能应跳过更新。
+   高 OOD 不一定是坏事。高分 OOD 状态可能说明 etg/BKTree 需要增量扩展；低分高 OOD 则可能应跳过更新。
 
 5. **增量层尚未成为完整规划输入**  
    当前 delta 主要用于安全记录，后续需要实现 BKTree delta 与 ETG delta 的可控合并/查询。
@@ -812,7 +812,7 @@ incremental_layer:
 
 本工作的主要方法可以概括为：
 
-> 以 BKTree-ETG 构成可解释经验图基线，以 Beam Search 进行图上规划；针对图覆盖不足和统计长尾问题，引入独立蒙特卡洛动作微调模型，通过 UCB 进行受控探索，通过置信度和优势门控决定是否替代 ETG；同时用严格 NID 解析、OOD 通道、RestartGuard、增量层和分阶段参数寻优保证在线修正过程可诊断、可回滚、可扩展。
+> 以 BKTree-etg 构成可解释经验图基线，以 Beam Search 进行图上规划；针对图覆盖不足和统计长尾问题，引入独立蒙特卡洛动作微调模型，通过 UCB 进行受控探索，通过置信度和优势门控决定是否替代 ETG；同时用严格 NID 解析、OOD 通道、RestartGuard、增量层和分阶段参数寻优保证在线修正过程可诊断、可回滚、可扩展。
 
 更简洁地说：
 
@@ -835,7 +835,7 @@ ParameterLearner/Web 解决“如何实验、比较和诊断”
 1. `study_summary.json`：总 trial、阶段、最佳目标值。
 2. 优化曲线：目标值整体变化。
 3. ETG 利用 + 探索微调平衡曲线：阶段行为是否符合预期。
-4. 动作来源占比：`kg_plan / kg_relaxed / mc_explore / tuning / ood`。
+4. 动作来源占比：`etg_plan / etg_relaxed / mc_explore / tuning / ood`。
 5. NID 解析质量：`exact` 是否下降，`OOD total` 是否异常上升。
 6. RestartGuard：是否大量跳过更新或熔断 OOD 探索。
 7. 高分 OOD 候选表：是否存在值得纳入增量层的状态。

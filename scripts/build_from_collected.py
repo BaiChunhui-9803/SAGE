@@ -6,7 +6,7 @@ Usage:
     python scripts/build_from_collected.py \
         --input output/collected_data/collected_data_*.pkl \
         --bktree-dir output/collected_data \
-        --output-dir cache/knowledge_graph/MarineMicro_MvsM_4_augmented/ \
+        --output-dir cache/experience_transition_graph/MarineMicro_MvsM_4_augmented/ \
         --validate
 """
 
@@ -33,7 +33,7 @@ from src.structure.BKTree_sc2 import (
 )
 from src.structure.custom_distance_sc2 import CustomDistance
 from src.data.loader import DataLoader
-from src.decision.knowledge_graph import DecisionKnowledgeGraph
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -269,7 +269,7 @@ def build_transitions(
         logger.info(f"  Marked {terminal_count} terminal states")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "kg_simple_transitions.pkl"
+    path = output_dir / "etg_simple_transitions.pkl"
     with open(path, "wb") as f:
         pickle.dump(transitions, f)
 
@@ -277,22 +277,22 @@ def build_transitions(
     return transitions
 
 
-def build_knowledge_graph(
+def build_experience_transition_graph(
     state_episodes: List[List[int]],
     action_episodes: List[List[str]],
     reward_episodes: List[List[float]],
     outcome_episodes: List[str],
     output_dir: Path,
     verbose: bool = True,
-) -> DecisionKnowledgeGraph:
-    logger.info("Building Knowledge Graph...")
-    kg = DecisionKnowledgeGraph(
+) -> DecisionExperienceTransitionGraph:
+    logger.info("Building Experience Transition Graph...")
+    ETG = DecisionExperienceTransitionGraph(
         use_context=False,
         context_window=0,
         action_format="cluster+letter",
     )
 
-    kg.build_from_data(
+    ETG.build_from_data(
         state_episodes=state_episodes,
         action_episodes=action_episodes,
         reward_episodes=reward_episodes,
@@ -301,16 +301,16 @@ def build_knowledge_graph(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "kg_simple.pkl"
-    kg.save(str(output_path))
+    output_path = output_dir / "etg_simple.pkl"
+    ETG.save(str(output_path))
 
-    stats = kg.get_statistics()
+    stats = ETG.get_statistics()
     if verbose:
         logger.info(f"  Total visits: {stats['total_visits']}")
         logger.info(f"  Unique states: {stats['unique_states']}")
         logger.info(f"  Unique actions: {stats['unique_actions']}")
 
-    return kg
+    return ETG
 
 
 def compute_distance_matrix(
@@ -395,9 +395,9 @@ def load_secondary_bktrees(
     return secondary_bktrees
 
 
-def collect_state_visits(kg: DecisionKnowledgeGraph) -> Dict[int, int]:
+def collect_state_visits(ETG: DecisionExperienceTransitionGraph) -> Dict[int, int]:
     visits: Dict[int, int] = {}
-    for state_id, actions in kg.state_action_map.items():
+    for state_id, actions in ETG.state_action_map.items():
         if not isinstance(state_id, (int, np.integer)):
             continue
         visits[int(state_id)] = sum(int(stats.visits) for stats in actions.values())
@@ -551,11 +551,11 @@ def compute_sparse_neighbor_index(
         return False
 
 
-def validate_knowledge_graph(kg: DecisionKnowledgeGraph):
-    logger.info("Validating Knowledge Graph...")
-    test_states = list(kg.unique_states)[:10]
+def validate_experience_transition_graph(ETG: DecisionExperienceTransitionGraph):
+    logger.info("Validating Experience Transition Graph...")
+    test_states = list(ETG.unique_states)[:10]
     for state in test_states:
-        top_actions = kg.get_top_k_actions(state, k=5, metric="quality_score")
+        top_actions = ETG.get_top_k_actions(state, k=5, metric="quality_score")
         if not top_actions:
             continue
         logger.info(f"  State {state}:")
@@ -567,14 +567,14 @@ def validate_knowledge_graph(kg: DecisionKnowledgeGraph):
             )
 
     states_with_data = 0
-    for state in kg.unique_states:
-        top_actions = kg.get_top_k_actions(state, k=1)
+    for state in ETG.unique_states:
+        top_actions = ETG.get_top_k_actions(state, k=1)
         if top_actions:
             states_with_data += 1
 
-    coverage = states_with_data / len(kg.unique_states) * 100 if kg.unique_states else 0
+    coverage = states_with_data / len(ETG.unique_states) * 100 if ETG.unique_states else 0
     logger.info(
-        f"  Coverage: {states_with_data}/{len(kg.unique_states)} ({coverage:.1f}%)"
+        f"  Coverage: {states_with_data}/{len(ETG.unique_states)} ({coverage:.1f}%)"
     )
 
 
@@ -598,7 +598,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Output directory (default: cache/knowledge_graph/{name}_augmented/)",
+        help="Output directory (default: cache/experience_transition_graph/{name}_augmented/)",
     )
     parser.add_argument(
         "--context-windows", type=int, nargs="+", default=[0], help="Context windows"
@@ -606,7 +606,7 @@ def main():
     parser.add_argument(
         "--validate",
         action="store_true",
-        help="Validate KG after building",
+        help="Validate ETG after building",
     )
     parser.add_argument(
         "--skip-distance-matrix",
@@ -659,7 +659,7 @@ def main():
                     map_id = part
                     break
         args.output_dir = str(
-            ROOT_DIR / "cache" / "knowledge_graph" / f"{map_id}_augmented"
+            ROOT_DIR / "cache" / "experience_transition_graph" / f"{map_id}_augmented"
         )
 
     output_dir = Path(args.output_dir)
@@ -673,7 +673,7 @@ def main():
         build_episodes_arrays(episodes, state_to_node)
     )
 
-    kg = None
+    ETG = None
     transitions = None
     for context_window in args.context_windows:
         transitions = build_transitions(
@@ -684,7 +684,7 @@ def main():
             unique_states=set(state_to_node.values()),
         )
 
-        kg = build_knowledge_graph(
+        ETG = build_experience_transition_graph(
             state_episodes=state_episodes,
             action_episodes=action_episodes,
             reward_episodes=reward_episodes,
@@ -693,7 +693,7 @@ def main():
         )
 
         if args.validate:
-            validate_knowledge_graph(kg)
+            validate_experience_transition_graph(ETG)
 
     if args.skip_distance_matrix:
         logger.info("Skipping state distance matrix (--skip-distance-matrix).")
@@ -706,12 +706,12 @@ def main():
             max_states=args.max_distance_matrix_states,
         )
 
-    if not dense_ready and not args.skip_sparse_neighbors and kg is not None:
+    if not dense_ready and not args.skip_sparse_neighbors and ETG is not None:
         compute_sparse_neighbor_index(
             args.bktree_dir,
             output_dir,
             node_to_state,
-            collect_state_visits(kg),
+            collect_state_visits(ETG),
             top_k=args.sparse_top_k,
             max_source_states=args.sparse_max_source_states,
             max_candidates_per_primary=args.sparse_max_candidates_per_primary,

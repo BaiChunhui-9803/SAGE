@@ -2,11 +2,11 @@
 Visualization module for PredictionRTS
 
 This module provides visualization tools for:
-- Knowledge Graph analysis
+- Experience Transition Graph analysis
 - Decision quality evaluation
 - Training metrics visualization
 """
 
-from .kg_visualizer import KnowledgeGraphVisualizer
+from .etg_visualizer import ExperienceTransitionGraphVisualizer
 
-__all__ = ["KnowledgeGraphVisualizer"]
+__all__ = ["ExperienceTransitionGraphVisualizer"]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Test SmartAgent with KGDecisionHelper integration
+Test SmartAgent with ETGDecisionHelper integration
 """
 
 import sys
@@ -64,13 +64,13 @@ def test_smart_agent_init():
         from src.env.agents.SmartAgent import SmartAgent
 
         agent = SmartAgent(
-            kg_path="cache/knowledge_graph/kg_simple.pkl",
+            etg_path="cache/experience_transition_graph/etg_simple.pkl",
             strategy="roulette",
-            use_kg_helper=True,
+            use_etg_helper=True,
         )
 
         print(f"  Strategy: {agent.strategy}")
-        print(f"  Use KG Helper: {agent.use_kg_helper}")
+        print(f"  Use ETG Helper: {agent.use_etg_helper}")
         print(f"  State Encoder: {type(agent.state_encoder).__name__}")
 
         if hasattr(agent.state_encoder, "state_node_dict"):
@@ -114,20 +114,20 @@ def test_state_encoding_with_real_data(agent):
             print(f"  ({my_count}, {enemy_count}) -> NOT FOUND [{desc}]")
 
 
-def test_kg_helper_integration(agent):
-    """Test KGDecisionHelper integration"""
+def test_etg_helper_integration(agent):
+    """Test ETGDecisionHelper integration"""
     print("\n" + "=" * 60)
-    print("Test 4: KGDecisionHelper Integration")
+    print("Test 4: ETGDecisionHelper Integration")
     print("=" * 60)
 
-    if agent is None or agent.kg_helper is None:
-        print("  [SKIP] KGHelper not available")
+    if agent is None or agent.etg_helper is None:
+        print("  [SKIP] ETGHelper not available")
         return
 
     test_states = [0, 109, 544, 396]
 
     for state_id in test_states:
-        action, info = agent.kg_helper.select_action(state_id, k=5, strategy="roulette")
+        action, info = agent.etg_helper.select_action(state_id, k=5, strategy="roulette")
         if action:
             quality = info.get("quality_score", 0)
             print(f"  State {state_id}: action={action}, quality={quality:.2f}")
@@ -167,13 +167,13 @@ def test_action_parsing(agent):
 if __name__ == "__main__":
     print("=" * 60)
     print("SmartAgent Test Suite")
-    print("Testing BKTree State Encoder and KGDecisionHelper Integration")
+    print("Testing BKTree State Encoder and ETGDecisionHelper Integration")
     print("=" * 60)
 
     test_bktree_state_encoder()
     agent = test_smart_agent_init()
     test_state_encoding_with_real_data(agent)
-    test_kg_helper_integration(agent)
+    test_etg_helper_integration(agent)
     test_action_parsing(agent)
 
     print("\n" + "=" * 60)

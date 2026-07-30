@@ -5,7 +5,7 @@ ReplayCollector: 批量回放 action 序列，收集 norm_state 数据并增量�
 继承 SmartAgent，复用其 BKTree 和动作执行能力，
 在 step() 中只做：获取 norm_state → 聚类 → 执行 action → 记录帧。
 
-不执行 Q-learning、不写文件、不依赖 KG/transitions/beam search。
+不执行 Q-learning、不写文件、不依赖 etg/transitions/beam search。
 
 支持增量保存与中断恢复：
 - 每 episode 完成后立即 pickle append 到增量文件

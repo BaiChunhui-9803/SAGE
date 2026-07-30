@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-cf_candidate_methods -- 6 ETG-based candidate identification methods
+cf_candidate_methods -- 6 etg-based candidate identification methods
 for counterfactual action override.
 
 Methods:
@@ -34,7 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.decision.knowledge_graph import DecisionKnowledgeGraph, ActionStats
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph, ActionStats
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ class Candidate:
         return (self.nid, self.bad_action, self.recommended_action)
 
 
-def load_kg_and_transitions(kg_path: str, trans_path: str = None):
+def load_etg_and_transitions(etg_path: str, trans_path: str = None):
     if trans_path is None:
-        candidate1 = kg_path.replace(".pkl", "_transitions.pkl")
-        candidate2 = kg_path.replace(".pkl", ".transitions.pkl")
+        candidate1 = etg_path.replace(".pkl", "_transitions.pkl")
+        candidate2 = etg_path.replace(".pkl", ".transitions.pkl")
         if os.path.exists(candidate1):
             trans_path = candidate1
         elif os.path.exists(candidate2):
@@ -64,12 +64,12 @@ def load_kg_and_transitions(kg_path: str, trans_path: str = None):
             raise FileNotFoundError(
                 f"Transitions file not found. Tried:\n  {candidate1}\n  {candidate2}"
             )
-    kg = DecisionKnowledgeGraph.load(kg_path)
+    ETG = DecisionExperienceTransitionGraph.load(etg_path)
     import pickle
 
     with open(trans_path, "rb") as f:
         transitions = pickle.load(f)
-    return kg, transitions
+    return ETG, transitions
 
 
 def load_episodes(run_dir: Path, trial_numbers: List[int] = None):
@@ -108,14 +108,14 @@ class QValueMethod:
 
     def __init__(
         self,
-        kg: DecisionKnowledgeGraph,
+        ETG: DecisionExperienceTransitionGraph,
         transitions: dict,
         gamma: float = 0.95,
         min_visits: int = 5,
         max_iterations: int = 100,
         convergence_threshold: float = 1e-3,
     ):
-        self.kg = kg
+        self.ETG = ETG
         self.transitions = transitions
         self.gamma = gamma
         self.min_visits = min_visits
@@ -167,7 +167,7 @@ class QValueMethod:
                     if not ns_dict:
                         continue
 
-                    quality = self.kg.get_action_quality(s, a)
+                    quality = self.ETG.get_action_quality(s, a)
                     reward = quality.get("avg_step_reward", 0.0) if quality else 0.0
 
                     expected_future = 0.0
@@ -206,7 +206,7 @@ class QValueMethod:
                 delta_q = best_q - q
                 if delta_q <= 0:
                     continue
-                quality = self.kg.get_action_quality(nid, action)
+                quality = self.ETG.get_action_quality(nid, action)
                 visits = quality.get("visits", 0) if quality else 0
                 if visits < self.min_visits:
                     continue
@@ -239,12 +239,12 @@ class CausalMethod:
 
     def __init__(
         self,
-        kg: DecisionKnowledgeGraph,
+        ETG: DecisionExperienceTransitionGraph,
         transitions: dict,
         min_visits: int = 5,
         max_propagation_depth: int = 10,
     ):
-        self.kg = kg
+        self.ETG = ETG
         self.transitions = transitions
         self.min_visits = min_visits
         self.max_depth = max_propagation_depth
@@ -287,7 +287,7 @@ class CausalMethod:
                 ate = best_prob - prob
                 if ate <= 0:
                     continue
-                quality = self.kg.get_action_quality(nid, action)
+                quality = self.ETG.get_action_quality(nid, action)
                 visits = quality.get("visits", 0) if quality else 0
                 candidates.append(
                     Candidate(
@@ -333,7 +333,7 @@ class CausalMethod:
 
                 trans_nid = self.transitions.get(nid, {})
                 if "__terminal__" in trans_nid:
-                    wr = self.kg.get_action_quality(nid, "0a")
+                    wr = self.ETG.get_action_quality(nid, "0a")
                     terminal_wr = wr.get("win_rate", 0.0) if wr else 0.0
                     cum_win_prob += reach_prob * terminal_wr
                     visited.add(nid)
@@ -358,7 +358,7 @@ class CausalMethod:
 
                 if best_action_info is None:
                     quality = (
-                        self.kg.get_action_quality(nid, list(trans_nid.keys())[0])
+                        self.ETG.get_action_quality(nid, list(trans_nid.keys())[0])
                         if trans_nid
                         else None
                     )
@@ -533,13 +533,13 @@ class PageRankMethod:
 
     def __init__(
         self,
-        kg: DecisionKnowledgeGraph,
+        ETG: DecisionExperienceTransitionGraph,
         transitions: dict,
         min_visits: int = 5,
         max_iterations: int = 200,
         damping: float = 0.85,
     ):
-        self.kg = kg
+        self.ETG = ETG
         self.transitions = transitions
         self.min_visits = min_visits
         self.max_iterations = max_iterations
@@ -605,7 +605,7 @@ class PageRankMethod:
                     best_h = max(best_h, action_h)
 
                 quality = (
-                    self.kg.get_action_quality(s, list(trans_s.keys())[0])
+                    self.ETG.get_action_quality(s, list(trans_s.keys())[0])
                     if trans_s
                     else None
                 )
@@ -655,7 +655,7 @@ class PageRankMethod:
                 delta_h = best_h - h_val
                 if delta_h <= 0:
                     continue
-                quality = self.kg.get_action_quality(nid, action)
+                quality = self.ETG.get_action_quality(nid, action)
                 visits = quality.get("visits", 0) if quality else 0
 
                 candidates.append(
@@ -688,12 +688,12 @@ class CFRMethod:
     def __init__(
         self,
         episodes: list,
-        kg: DecisionKnowledgeGraph,
+        ETG: DecisionExperienceTransitionGraph,
         transitions: dict,
         min_regret_samples: int = 5,
     ):
         self.episodes = episodes
-        self.kg = kg
+        self.ETG = ETG
         self.transitions = transitions
         self.min_samples = min_regret_samples
 
@@ -743,7 +743,7 @@ class CFRMethod:
                     cf_value = 0.0
                     for ns, cnt in ns_dict.items():
                         prob = cnt / total
-                        ns_quality = self.kg.get_action_quality(ns, alt_action)
+                        ns_quality = self.ETG.get_action_quality(ns, alt_action)
                         if ns_quality:
                             future_val = ns_quality.get("avg_future_reward", 0.0)
                             ns_wr = ns_quality.get("win_rate", 0.0)

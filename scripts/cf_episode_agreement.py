@@ -18,7 +18,7 @@ Methods:
 
 Usage:
     python scripts/cf_episode_agreement.py
-    python scripts/cf_episode_agreement.py --run_dir ... --kg_file ...
+    python scripts/cf_episode_agreement.py --run_dir ... --etg_file ...
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ from scipy.stats import chi2_contingency
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src import ROOT_DIR
-from src.decision.knowledge_graph import DecisionKnowledgeGraph
-from scripts.cf_candidate_methods import load_kg_and_transitions
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
+from scripts.cf_candidate_methods import load_etg_and_transitions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +59,7 @@ N_METHODS = 6
 
 
 def precompute_q_advantage(
-    kg, transitions, gamma=0.95, min_visits=5, max_iter=100, conv=1e-3
+    ETG, transitions, gamma=0.95, min_visits=5, max_iter=100, conv=1e-3
 ):
     states = set()
     for nid in transitions:
@@ -89,7 +89,7 @@ def precompute_q_advantage(
                 ns_dict = info.get("next_states", {})
                 if not ns_dict:
                     continue
-                quality = kg.get_action_quality(s, a)
+                quality = ETG.get_action_quality(s, a)
                 reward = quality.get("avg_step_reward", 0.0) if quality else 0.0
                 exp_future = sum(
                     (cnt / total) * values.get(ns, 0.0) for ns, cnt in ns_dict.items()
@@ -116,7 +116,7 @@ def precompute_q_advantage(
             ns_dict = info.get("next_states", {})
             if not ns_dict:
                 continue
-            quality = kg.get_action_quality(s, a)
+            quality = ETG.get_action_quality(s, a)
             reward = quality.get("avg_step_reward", 0.0) if quality else 0.0
             exp_future = sum(
                 (cnt / total) * values.get(ns, 0.0) for ns, cnt in ns_dict.items()
@@ -147,7 +147,7 @@ def precompute_causal_advantage(transitions, min_visits=3):
 
 
 def precompute_pagerank_advantage(
-    kg, transitions, min_visits=3, max_iter=200, damping=0.85
+    ETG, transitions, min_visits=3, max_iter=200, damping=0.85
 ):
     states = set()
     for nid in transitions:
@@ -192,7 +192,7 @@ def precompute_pagerank_advantage(
                 )
                 best_h = max(best_h, action_h)
             quality = (
-                kg.get_action_quality(s, list(trans_s.keys())[0]) if trans_s else None
+                ETG.get_action_quality(s, list(trans_s.keys())[0]) if trans_s else None
             )
             immediate_wr = quality.get("win_rate", 0.0) if quality else 0.0
             new_h[s] = damping * best_h + (1 - damping) * immediate_wr
@@ -224,13 +224,13 @@ def precompute_pagerank_advantage(
     return adv
 
 
-def precompute_cfr_advantage(kg, transitions, min_visits=3):
+def precompute_cfr_advantage(ETG, transitions, min_visits=3):
     v_etg = {}
-    for nid in kg.unique_states:
-        quality = kg.get_action_quality(nid, None)
+    for nid in ETG.unique_states:
+        quality = ETG.get_action_quality(nid, None)
         if quality is None:
             best_qs = 0.0
-            for a_info in kg.state_action_map.get(nid, {}).values():
+            for a_info in ETG.state_action_map.get(nid, {}).values():
                 best_qs = max(best_qs, a_info.quality_score)
             v_etg[nid] = best_qs
         else:
@@ -858,13 +858,13 @@ def main():
         ),
     )
     parser.add_argument(
-        "--kg_file",
+        "--etg_file",
         default=str(
             ROOT_DIR
             / "cache"
-            / "knowledge_graph"
+            / "experience_transition_graph"
             / "MarineMicro_MvsM_4_augmented"
-            / "kg_simple.pkl"
+            / "etg_simple.pkl"
         ),
     )
     parser.add_argument("--output", default=None)
@@ -877,8 +877,8 @@ def main():
     t_start = time.time()
 
     logger.info("Loading ETG and transitions...")
-    kg, transitions = load_kg_and_transitions(args.kg_file)
-    logger.info(f"  ETG: {len(kg.unique_states)} states, {kg.total_visits} visits")
+    ETG, transitions = load_etg_and_transitions(args.etg_file)
+    logger.info(f"  ETG: {len(ETG.unique_states)} states, {ETG.total_visits} visits")
 
     valid_nids = set()
     for nid, actions in transitions.items():
@@ -894,7 +894,7 @@ def main():
     # Pre-compute from ETG
     logger.info("Pre-computing Q-value advantage table...")
     t0 = time.time()
-    q_adv = precompute_q_advantage(kg, transitions)
+    q_adv = precompute_q_advantage(ETG, transitions)
     logger.info(f"  Done: {len(q_adv)} entries in {time.time() - t0:.1f}s")
 
     logger.info("Pre-computing Causal advantage table...")
@@ -904,12 +904,12 @@ def main():
 
     logger.info("Pre-computing PageRank advantage table...")
     t0 = time.time()
-    h_adv = precompute_pagerank_advantage(kg, transitions)
+    h_adv = precompute_pagerank_advantage(ETG, transitions)
     logger.info(f"  Done: {len(h_adv)} entries in {time.time() - t0:.1f}s")
 
     logger.info("Pre-computing CFR advantage table...")
     t0 = time.time()
-    cf_adv = precompute_cfr_advantage(kg, transitions)
+    cf_adv = precompute_cfr_advantage(ETG, transitions)
     logger.info(f"  Done: {len(cf_adv)} entries in {time.time() - t0:.1f}s")
 
     # Load episodes

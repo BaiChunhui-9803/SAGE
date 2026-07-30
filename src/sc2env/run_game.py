@@ -40,13 +40,13 @@ def _apply_map_config(map_key: str):
         agent_module._ALG_CONFIG = _ALG_CONFIG
         agent_module._PATH_CONFIG = _PATH_CONFIG
 
-    kg_agent_module = sys.modules.get("src.sc2env.kg_guided_agent")
-    if kg_agent_module is not None:
-        kg_agent_module._MAP_CONFIG = _MAP_CONFIG
-        kg_agent_module._MAP = _MAP
-        kg_agent_module._ENV_CONFIG = _ENV_CONFIG
-        kg_agent_module._ALG_CONFIG = _ALG_CONFIG
-        kg_agent_module._PATH_CONFIG = _PATH_CONFIG
+    etg_agent_module = sys.modules.get("src.sc2env.etg_guided_agent")
+    if etg_agent_module is not None:
+        etg_agent_module._MAP_CONFIG = _MAP_CONFIG
+        etg_agent_module._MAP = _MAP
+        etg_agent_module._ENV_CONFIG = _ENV_CONFIG
+        etg_agent_module._ALG_CONFIG = _ALG_CONFIG
+        etg_agent_module._PATH_CONFIG = _PATH_CONFIG
 
     replay_module = sys.modules.get("src.sc2env.replay_collector")
     if replay_module is not None:
@@ -733,7 +733,7 @@ def run_game(
     beam_params: Optional[dict] = None,
     replay_actions: Optional[list] = None,
     replay_runs: int = 1,
-    kg_file: Optional[str] = None,
+    etg_file: Optional[str] = None,
     action_strategy: str = "best_beam",
     batch_replay_count: int = 3,
     batch_start: int = 0,
@@ -745,7 +745,7 @@ def run_game(
     override_model_path: Optional[str] = None,
     cf_config: Optional[dict] = None,
     cf_runs: int = 1,
-    load_kg: bool = True,
+    load_etg: bool = True,
 ):
     _apply_map_config(map_key)
     steps = _ENV_CONFIG["_MAX_STEP"]
@@ -770,8 +770,8 @@ def run_game(
             primary_threshold=primary_threshold,
             secondary_threshold=secondary_threshold,
         )
-    elif agent_type == "kg_guided" and bridge is not None:
-        from src.sc2env.kg_guided_agent import KGGuidedAgent
+    elif agent_type == "etg_guided" and bridge is not None:
+        from src.sc2env.etg_guided_agent import ETGGuidedAgent
 
         _apply_map_config(map_key)
 
@@ -867,41 +867,41 @@ def run_game(
             _sn_display = _sn_path if _sn_path else "augmented path (not found)"
             print(f"[run_game] Warning: state_node.txt not found ({_sn_display})")
 
-        _kg = None
+        _etg = None
         _transitions = None
         _dist_matrix = None
-        if data_dir and load_kg:
+        if data_dir and load_etg:
             from src import ROOT_DIR as _ROOT
             import pickle as _pickle
 
-            _kg_dir = _ROOT / "cache" / "knowledge_graph"
-            _kg_file = None
-            if kg_file:
-                _kg_file = str(_kg_dir / kg_file)
-                if not os.path.exists(_kg_file):
+            _etg_dir = _ROOT / "cache" / "experience_transition_graph"
+            _etg_file = None
+            if etg_file:
+                _etg_file = str(_etg_dir / etg_file)
+                if not os.path.exists(_etg_file):
                     print(
-                        f"[run_game] Warning: Specified KG file not found: {_kg_file}"
+                        f"[run_game] Warning: Specified ETG file not found: {_etg_file}"
                     )
-                    _kg_file = None
-            if _kg_file is None and _kg_dir.exists():
+                    _etg_file = None
+            if _etg_file is None and _etg_dir.exists():
                 for _pkl in sorted(
-                    (p for p in _kg_dir.rglob("*.pkl") if "_transitions" not in p.name),
+                    (p for p in _etg_dir.rglob("*.pkl") if "_transitions" not in p.name),
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
                 ):
-                    _kg_file = str(_pkl)
-                    print(f"[run_game] Auto-discovered KG: {_kg_file}")
+                    _etg_file = str(_pkl)
+                    print(f"[run_game] Auto-discovered ETG: {_etg_file}")
                     break
-            if _kg_file:
+            if _etg_file:
                 try:
-                    from src.decision.knowledge_graph import DecisionKnowledgeGraph
+                    from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
-                    _kg = DecisionKnowledgeGraph.load(_kg_file)
-                    print(f"Loaded KG from {_kg_file}")
+                    _etg = DecisionExperienceTransitionGraph.load(_etg_file)
+                    print(f"Loaded ETG from {_etg_file}")
                 except Exception as e:
-                    print(f"Warning: Failed to load KG: {e}")
+                    print(f"Warning: Failed to load ETG: {e}")
             _trans_path = (
-                _kg_file.replace(".pkl", "_transitions.pkl") if _kg_file else ""
+                _etg_file.replace(".pkl", "_transitions.pkl") if _etg_file else ""
             )
             if _trans_path and os.path.exists(_trans_path):
                 try:
@@ -931,11 +931,11 @@ def run_game(
                         _npy_dir
                         / f"state_sparse_neighbors_{_map_id}_{_data_id}.pkl",
                     ]
-                    if _kg_file:
+                    if _etg_file:
                         _sparse_candidates.extend(
                             [
-                                Path(_kg_file).parent / "sparse_neighbors.pkl",
-                                Path(_kg_file).parent / "npy" / "sparse_neighbors.pkl",
+                                Path(_etg_file).parent / "sparse_neighbors.pkl",
+                                Path(_etg_file).parent / "npy" / "sparse_neighbors.pkl",
                             ]
                         )
                     for _sp_path in _sparse_candidates:
@@ -954,15 +954,15 @@ def run_game(
                             break
                         except Exception as e:
                             print(f"Warning: Failed to load sparse distance index: {e}")
-        elif data_dir and not load_kg:
-            print("[run_game] Skipping ETG/transitions/distance loading (load_kg=False)")
+        elif data_dir and not load_etg:
+            print("[run_game] Skipping etg/transitions/distance loading (load_etg=False)")
 
-        agent1 = KGGuidedAgent(
+        agent1 = ETGGuidedAgent(
             bridge=bridge,
             fallback_action=fallback_action,
             initial_bktree_data=bktree_data,
             state_id_map=state_id_map,
-            kg=_kg,
+            ETG=_etg,
             transitions=_transitions,
             dist_matrix=_dist_matrix,
             mode=autopilot_mode,
@@ -971,7 +971,7 @@ def run_game(
             replay_runs=replay_runs,
             action_strategy=action_strategy,
             data_dir=data_dir,
-            kg_file=kg_file,
+            etg_file=etg_file,
             override_model_path=override_model_path,
             cf_config=cf_config,
             bktree_primary_threshold=primary_threshold,

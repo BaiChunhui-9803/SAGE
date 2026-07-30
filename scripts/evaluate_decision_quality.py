@@ -2,18 +2,18 @@
 """
 Evaluate Decision Quality
 
-This script evaluates the quality of decision recommendations using the knowledge graph.
+This script evaluates the quality of decision recommendations using the experience transition graph.
 
 Metrics:
   - Quality Score: Average future_reward of recommended actions
   - Win Rate: Average win_rate of recommended actions
-  - Coverage: How many recommended actions are in knowledge graph top-k
+  - Coverage: How many recommended actions are in experience transition graph top-k
   - Diversity: Entropy of recommended actions
   - Confidence: Average frequency of recommended actions
 
 Usage:
-    python scripts/evaluate_decision_quality.py --kg-type simple
-    python scripts/evaluate_decision_quality.py --kg-type context --context-window 5
+    python scripts/evaluate_decision_quality.py --etg-type simple
+    python scripts/evaluate_decision_quality.py --etg-type context --context-window 5
 
 Author: PredictionRTS Team
 Date: 2026-03-21
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src import get_config, set_seed, ROOT_DIR
 from src.data.loader import DataLoader
-from src.decision.knowledge_graph import DecisionKnowledgeGraph
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -43,7 +43,7 @@ def evaluate_model(
     model_name: str,
     test_states: list,
     test_actions: list,
-    kg: DecisionKnowledgeGraph,
+    ETG: DecisionExperienceTransitionGraph,
     top_k: int = 5,
     verbose: bool = False,
 ) -> dict:
@@ -54,7 +54,7 @@ def evaluate_model(
         model_name: Name of the model (for reporting)
         test_states: List of state sequences
         test_actions: List of action sequences
-        kg: Knowledge graph
+        ETG: Experience Transition Graph
         top_k: Number of top actions to consider
         verbose: Print details
 
@@ -81,33 +81,33 @@ def evaluate_model(
             state = states[t]
             true_action = actions[t]
 
-            # Get top-k recommendations from knowledge graph
-            kg_top_actions = kg.get_top_k_actions(
+            # Get top-k recommendations from experience transition graph
+            etg_top_actions = ETG.get_top_k_actions(
                 state=state, k=top_k, metric="quality_score", min_visits=3
             )
 
-            if not kg_top_actions:
+            if not etg_top_actions:
                 continue
 
             results["total_evaluated"] += 1
 
             # Extract recommended actions and their stats
-            recommended = [action for action, _ in kg_top_actions]
+            recommended = [action for action, _ in etg_top_actions]
             all_recommended_actions.extend(recommended)
 
             # 1. Quality Score
             avg_quality = np.mean(
-                [stats["quality_score"] for _, stats in kg_top_actions]
+                [stats["quality_score"] for _, stats in etg_top_actions]
             )
             results["quality_scores"].append(avg_quality)
 
             # 2. Win Rate
-            avg_win_rate = np.mean([stats["win_rate"] for _, stats in kg_top_actions])
+            avg_win_rate = np.mean([stats["win_rate"] for _, stats in etg_top_actions])
             results["win_rates"].append(avg_win_rate)
 
             # 3. Coverage
-            kg_action_set = {action for action, _ in kg_top_actions}
-            coverage = len(kg_action_set) / top_k
+            etg_action_set = {action for action, _ in etg_top_actions}
+            coverage = len(etg_action_set) / top_k
             results["coverages"].append(coverage)
 
             # 4. Diversity (entropy of recommended actions)
@@ -122,7 +122,7 @@ def evaluate_model(
             # 5. Confidence
             avg_confidence = np.mean(
                 [
-                    kg.get_action_confidence(state=state, action=action)
+                    ETG.get_action_confidence(state=state, action=action)
                     for action in recommended
                 ]
             )
@@ -149,7 +149,7 @@ def evaluate_model(
 
 
 def generate_report(
-    results: dict, kg_stats: dict, output_path: Path, kg_type: str, context_window: int
+    results: dict, etg_stats: dict, output_path: Path, etg_type: str, context_window: int
 ):
     """Generate markdown evaluation report"""
 
@@ -158,12 +158,12 @@ def generate_report(
 
         # Summary
         f.write("## Summary\n\n")
-        f.write(f"- **Knowledge Graph Type**: {kg_type}\n")
+        f.write(f"- **Experience Transition Graph Type**: {etg_type}\n")
         if context_window > 0:
             f.write(f"- **Context Window**: {context_window}\n")
         f.write(f"- **Total Evaluated**: {results['total_evaluated']}\n")
-        f.write(f"- **Unique States in KG**: {kg_stats['unique_states']}\n")
-        f.write(f"- **Unique Actions in KG**: {kg_stats['unique_actions']}\n\n")
+        f.write(f"- **Unique States in ETG**: {etg_stats['unique_states']}\n")
+        f.write(f"- **Unique Actions in ETG**: {etg_stats['unique_actions']}\n\n")
 
         # Metrics
         f.write("## Evaluation Metrics\n\n")
@@ -191,7 +191,7 @@ def generate_report(
 def main():
     parser = argparse.ArgumentParser(description="Evaluate decision quality")
     parser.add_argument(
-        "--kg-type", type=str, default="simple", choices=["simple", "context"]
+        "--etg-type", type=str, default="simple", choices=["simple", "context"]
     )
     parser.add_argument("--context-window", type=int, default=5)
     parser.add_argument("--test-size", type=float, default=0.2)
@@ -202,22 +202,22 @@ def main():
 
     set_seed(args.seed)
 
-    # Load knowledge graph
-    kg_dir = ROOT_DIR / "cache" / "knowledge_graph"
-    if args.kg_type == "simple":
-        kg_path = kg_dir / "kg_simple.pkl"
+    # Load experience transition graph
+    etg_dir = ROOT_DIR / "cache" / "experience_transition_graph"
+    if args.etg_type == "simple":
+        etg_path = etg_dir / "etg_simple.pkl"
         context_window = 0
     else:
-        kg_path = kg_dir / f"kg_context_{args.context_window}.pkl"
+        etg_path = etg_dir / f"etg_context_{args.context_window}.pkl"
         context_window = args.context_window
 
-    if not kg_path.exists():
-        logger.error(f"Knowledge graph not found: {kg_path}")
-        logger.error("Please run: python scripts/build_knowledge_graph.py")
+    if not etg_path.exists():
+        logger.error(f"Experience Transition Graph not found: {etg_path}")
+        logger.error("Please run: python scripts/build_experience_transition_graph.py")
         return
 
-    kg = DecisionKnowledgeGraph.load(kg_path)
-    kg_stats = kg.get_statistics()
+    ETG = DecisionExperienceTransitionGraph.load(etg_path)
+    etg_stats = ETG.get_statistics()
 
     # Load test data
     cfg = get_config()
@@ -262,10 +262,10 @@ def main():
     # Evaluate
     logger.info("Evaluating decision quality...")
     results = evaluate_model(
-        model_name=f"Knowledge Graph ({args.kg_type})",
+        model_name=f"Experience Transition Graph ({args.etg_type})",
         test_states=test_states,
         test_actions=test_actions_raw,
-        kg=kg,
+        ETG=ETG,
         top_k=args.top_k,
         verbose=True,
     )
@@ -276,7 +276,7 @@ def main():
     print("=" * 60)
 
     context_str = f" (context_window={context_window})" if context_window > 0 else ""
-    print(f"\nKnowledge Graph: {args.kg_type}{context_str}")
+    print(f"\nExperience Transition Graph: {args.etg_type}{context_str}")
     print(f"Test Episodes: {len(test_states)}")
     print(f"Total Evaluated: {results['total_evaluated']}")
     print()
@@ -299,9 +299,9 @@ def main():
 
     generate_report(
         results=results,
-        kg_stats=kg_stats,
+        etg_stats=etg_stats,
         output_path=report_path,
-        kg_type=args.kg_type,
+        etg_type=args.etg_type,
         context_window=context_window,
     )
 

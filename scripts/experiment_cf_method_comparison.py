@@ -7,7 +7,7 @@ methods on real data and produce a comparison report.
 Usage:
     python scripts/experiment_cf_method_comparison.py \
         --run_dir output/learner_results/training_runs/run_0002 \
-        --kg_file cache/knowledge_graph/MarineMicro_MvsM_4_augmented/kg_simple.pkl \
+        --etg_file cache/experience_transition_graph/MarineMicro_MvsM_4_augmented/etg_simple.pkl \
         --top_k 20
 """
 
@@ -35,7 +35,7 @@ from scripts.cf_candidate_methods import (
     PageRankMethod,
     CFRMethod,
     StatisticalBaseline,
-    load_kg_and_transitions,
+    load_etg_and_transitions,
     load_episodes,
     compute_jaccard_matrix,
     find_consensus,
@@ -50,14 +50,14 @@ logger = logging.getLogger(__name__)
 
 
 def run_all_methods(
-    kg_path: str,
+    etg_path: str,
     run_dir: Path,
     top_k: int = 20,
     recent_trials: int = None,
 ) -> Dict[str, List[Candidate]]:
     logger.info("Loading ETG and transitions...")
-    kg, transitions = load_kg_and_transitions(kg_path)
-    logger.info(f"  ETG: {len(kg.unique_states)} states, {kg.total_visits} visits")
+    ETG, transitions = load_etg_and_transitions(etg_path)
+    logger.info(f"  ETG: {len(ETG.unique_states)} states, {ETG.total_visits} visits")
 
     logger.info("Loading episode data...")
     episodes = load_episodes(run_dir)
@@ -87,13 +87,13 @@ def run_all_methods(
     logger.info("\n" + "=" * 60)
     logger.info("Method 1/6: Q-value (Value Iteration)")
     logger.info("=" * 60)
-    m1 = QValueMethod(kg, transitions, gamma=0.95, min_visits=5)
+    m1 = QValueMethod(ETG, transitions, gamma=0.95, min_visits=5)
     all_results[m1.name()] = m1.run()
 
     logger.info("\n" + "=" * 60)
     logger.info("Method 2/6: Causal (do-calculus)")
     logger.info("=" * 60)
-    m2 = CausalMethod(kg, transitions, min_visits=5, max_propagation_depth=10)
+    m2 = CausalMethod(ETG, transitions, min_visits=5, max_propagation_depth=10)
     all_results[m2.name()] = m2.run()
 
     logger.info("\n" + "=" * 60)
@@ -105,13 +105,13 @@ def run_all_methods(
     logger.info("\n" + "=" * 60)
     logger.info("Method 4/6: PageRank (Hitting)")
     logger.info("=" * 60)
-    m4 = PageRankMethod(kg, transitions, min_visits=5, max_iterations=200, damping=0.85)
+    m4 = PageRankMethod(ETG, transitions, min_visits=5, max_iterations=200, damping=0.85)
     all_results[m4.name()] = m4.run()
 
     logger.info("\n" + "=" * 60)
     logger.info("Method 5/6: CFR (Regret)")
     logger.info("=" * 60)
-    m5 = CFRMethod(episodes, kg, transitions, min_regret_samples=5)
+    m5 = CFRMethod(episodes, ETG, transitions, min_regret_samples=5)
     all_results[m5.name()] = m5.run()
 
     logger.info("\n" + "=" * 60)
@@ -298,15 +298,15 @@ if __name__ == "__main__":
         help="Training run directory with episodes",
     )
     parser.add_argument(
-        "--kg_file",
+        "--etg_file",
         default=str(
             ROOT_DIR
             / "cache"
-            / "knowledge_graph"
+            / "experience_transition_graph"
             / "MarineMicro_MvsM_4_augmented"
-            / "kg_simple.pkl"
+            / "etg_simple.pkl"
         ),
-        help="Path to kg_simple.pkl",
+        help="Path to etg_simple.pkl",
     )
     parser.add_argument(
         "--top_k", type=int, default=20, help="Top-K for Jaccard comparison"
@@ -315,7 +315,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     results = run_all_methods(
-        kg_path=args.kg_file,
+        etg_path=args.etg_file,
         run_dir=Path(args.run_dir),
         top_k=args.top_k,
     )

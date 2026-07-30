@@ -1,7 +1,7 @@
 """List or kill orphan PredictionRTS multiprocessing child processes.
 
 This is intended for Windows runs where SC2 launch fails with WinError 1455
-because previous run_live_game child processes kept large KG/SC2 memory alive.
+because previous run_live_game child processes kept large etg/SC2 memory alive.
 By default it only lists candidates. Pass --kill to terminate them.
 """
 

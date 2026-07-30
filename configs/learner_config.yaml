@@ -56,11 +56,11 @@ execution:
   startup_wait_seconds: 120
   total_trials: 50
 game:
-  api_load_kg: false
+  api_load_etg: false
   autopilot_mode: multi_step
   data_dir: data/MarineMicro_MvsM_4/augmented_1
   fallback_action: action_ATK_nearest_weakest
-  kg_file: MarineMicro_MvsM_4_augmented/kg_simple.pkl
+  etg_file: MarineMicro_MvsM_4_augmented/etg_simple.pkl
   map_key: sce-1
 incremental_layer:
   delta_dir: incremental_layer
@@ -101,8 +101,8 @@ phased_optimization:
   synergy_etg_first: true
   synergy_etg_pool_size: 3
   synergy_etg_protected_sources:
-  - kg_plan
-  - kg_follow
+  - etg_plan
+  - etg_follow
   synergy_etg_selection: weighted
   synergy_etg_weights:
   - 0.6
@@ -127,7 +127,7 @@ phased_optimization:
       min_advantage: 0.5
       min_confidence: 0.15
       min_visits: 3
-    kg_relaxed:
+    etg_relaxed:
       min_advantage: 0.5
       min_confidence: 0.15
       min_visits: 3
@@ -138,7 +138,7 @@ phased_optimization:
   synergy_validation_sources:
   - ood
   - fallback
-  - kg_relaxed
+  - etg_relaxed
   - fuzzy_plan
   - diverge
 search_space:

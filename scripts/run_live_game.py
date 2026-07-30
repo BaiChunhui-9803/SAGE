@@ -4,7 +4,7 @@ Live Game Launcher — 启动实时对局系统
 
 Usage:
     # 一键启动 (游戏进程 + API 服务)
-    python scripts/run_live_game.py --map_key sce-1 --kg_file xxx.pkl
+    python scripts/run_live_game.py --map_key sce-1 --etg_file xxx.pkl
 
     # 分别启动
     python scripts/run_live_game.py --mode game --map_key sce-1
@@ -176,7 +176,7 @@ def _run_game_process(bridge, args):
     action_strategy = str(beam_params.get("action_strategy") or args.action_strategy)
 
     agent_type = (
-        "batch_replay" if autopilot_mode == "batch_replay" else "kg_guided"
+        "batch_replay" if autopilot_mode == "batch_replay" else "etg_guided"
     )
 
     cf_config = None
@@ -201,7 +201,7 @@ def _run_game_process(bridge, args):
         beam_params=beam_params,
         replay_actions=args.replay_actions.split(",") if args.replay_actions else None,
         replay_runs=args.replay_runs,
-        kg_file=args.kg_file,
+        etg_file=args.etg_file,
         action_strategy=action_strategy,
         batch_replay_count=args.replay_count,
         batch_start=args.batch_start,
@@ -213,7 +213,7 @@ def _run_game_process(bridge, args):
         override_model_path=args.override_model_path,
         cf_config=cf_config,
         cf_runs=args.cf_runs,
-        load_kg=not args.skip_game_kg,
+        load_etg=not args.skip_game_etg,
     )
 
 
@@ -221,13 +221,13 @@ def _run_api_process(bridge, args):
     _ensure_utf8_stdio()
     from src.sc2env.bridge_server import run_server
 
-    kg_file = None if args.skip_api_kg else args.kg_file
-    data_dir = None if args.skip_api_kg else args.data_dir
+    etg_file = None if args.skip_api_etg else args.etg_file
+    data_dir = None if args.skip_api_etg else args.data_dir
     run_server(
         bridge,
         host=args.host,
         port=args.port,
-        kg_file=kg_file,
+        etg_file=etg_file,
         data_dir=data_dir,
     )
 
@@ -246,7 +246,7 @@ def main():
         "--run_name", default=None, help="Run name (auto-generated if None)"
     )
     parser.add_argument(
-        "--kg_file", default=None, help="KG pickle filename in cache/knowledge_graph/"
+        "--etg_file", default=None, help="ETG pickle filename in cache/experience_transition_graph/"
     )
     parser.add_argument(
         "--data_dir",
@@ -256,19 +256,19 @@ def main():
     parser.add_argument(
         "--fallback_action",
         default="action_ATK_nearest_weakest",
-        help="Default fallback action when no KG recommendation",
+        help="Default fallback action when no ETG recommendation",
     )
     parser.add_argument("--host", default="0.0.0.0", help="API server host")
     parser.add_argument("--port", type=int, default=8000, help="API server port")
     parser.add_argument(
-        "--skip_api_kg",
+        "--skip_api_etg",
         action="store_true",
-        help="Do not preload KG in the API process; the game agent still loads it.",
+        help="Do not preload ETG in the API process; the game agent still loads it.",
     )
     parser.add_argument(
-        "--skip_game_kg",
+        "--skip_game_etg",
         action="store_true",
-        help="Do not load ETG/transitions/distance matrix in the game agent.",
+        help="Do not load etg/transitions/distance matrix in the game agent.",
     )
     parser.add_argument(
         "--window_x", type=int, default=None, help="SC2 window X position"
@@ -489,20 +489,20 @@ def main():
     parser.add_argument(
         "--beam_params_file",
         default=None,
-        help="JSON file merged into initial KGGuidedAgent beam params before game startup",
+        help="JSON file merged into initial ETGGuidedAgent beam params before game startup",
     )
     parser.add_argument(
         "--beam_params_json",
         default=None,
-        help="Inline JSON merged into initial KGGuidedAgent beam params before game startup",
+        help="Inline JSON merged into initial ETGGuidedAgent beam params before game startup",
     )
     args = parser.parse_args()
 
-    if args.mode in ("game", "all") and args.kg_file is None:
+    if args.mode in ("game", "all") and args.etg_file is None:
         print(
-            "Warning: --kg_file not specified. KG predictions will not work until loaded via API."
+            "Warning: --etg_file not specified. ETG predictions will not work until loaded via API."
         )
-        print("         You can load it later via: POST /game/load_kg?kg_file=xxx.pkl")
+        print("         You can load it later via: POST /game/load_etg?etg_file=xxx.pkl")
 
     if args.mode == "all":
         from src.sc2env.bridge import GameBridge
