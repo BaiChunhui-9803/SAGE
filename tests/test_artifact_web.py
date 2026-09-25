@@ -80,15 +80,21 @@ def test_english_pages_render_and_execute_planning_and_rollout():
         at.radio(key="english_page").set_value(page).run()
         check()
         if page == "Experience Transition Graph":
-            assert {item.label: item.value for item in at.slider}["Neighborhood hops"] == 1
+            assert at.number_input(key="english_state_sce-1").value == 1
+            assert {item.label: item.value for item in at.slider}["Neighborhood hops"] == 2
             assert {item.label: item.value for item in at.slider}["Neighbors per state"] == 6
             assert {item.label: item.value for item in at.slider}["Maximum rendered nodes"] == 24
             assert not any(item.key == "english_method" for item in at.selectbox)
         if page == "Beam-search planning":
             at.button[0].click().run()
             check()
+            assert "No admissible action" in at.warning[0].value
+            at.number_input(key="english_state_sce-1").set_value(414).run()
+            at.button[0].click().run()
+            check()
             assert "Recommended" in at.success[0].value
         if page == "Graph rollout":
+            at.number_input(key="english_state_sce-1").set_value(414).run()
             at.button[0].click().run()
             check()
             assert at.dataframe[0].value.shape[0] > 1

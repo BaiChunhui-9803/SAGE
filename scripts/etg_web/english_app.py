@@ -26,13 +26,6 @@ def graph_inputs(scenario):
     return graph, transitions
 
 
-@st.cache_data(max_entries=6)
-def initial_state(scenario):
-    graph, transitions = graph_inputs(scenario)
-    return max((s for s in graph.state_action_map if s in transitions and not transitions[s].get("__terminal__")),
-        key=lambda s: sum(a.visits for a in graph.state_action_map[s].values()))
-
-
 def recorded_parameters(scenario, method):
     for path in sorted((PACK / "raw/evaluations").glob("*/final_eval_summary.json")):
         meta = read_json(path)
@@ -68,7 +61,7 @@ def network_html(nodes, edges):
 def graph_page(graph, transitions, start):
     st.caption("Explore a small outgoing neighborhood in the selected scenario's Experience Transition Graph. Node IDs belong to that scenario.")
     cols = st.columns(3)
-    hops = cols[0].slider("Neighborhood hops", 1, 3, 1)
+    hops = cols[0].slider("Neighborhood hops", 1, 3, 2)
     neighbors = cols[1].slider("Neighbors per state", 1, 12, 6)
     limit = cols[2].slider("Maximum rendered nodes", 10, 100, 24)
     visits = st.number_input("Minimum state-action visits", 1, value=1)
@@ -174,9 +167,8 @@ The paper page displays results, figures and an input-directory browser. Each gr
         st.sidebar.caption(SCENARIOS[scenario] + "_augmented")
         with st.spinner("Loading graph assets..."):
             graph, transitions = graph_inputs(scenario)
-        supported = initial_state(scenario)
-        start = st.sidebar.number_input("Initial abstract state ID", min_value=0, value=int(supported), key=f"english_state_{scenario}")
-        st.sidebar.caption(f"Graph states: {len(graph.state_action_map):,}. Initial default: the most visited nonterminal source.")
+        start = st.sidebar.number_input("Initial abstract state ID", min_value=0, value=1, key=f"english_state_{scenario}")
+        st.sidebar.caption(f"Graph states: {len(graph.state_action_map):,}. Default initial state ID: 1.")
         if page == "Experience Transition Graph":
             graph_page(graph, transitions, start)
         else:

@@ -28,11 +28,11 @@ python -m streamlit run scripts/visualize_etg_web_en.py
 
 The plotting command writes Figures 3–7 to `output/paper_reproduction/figures/`. The explorer provides paper tables and figures, a directory browser for their inputs, graph inspection, beam planning, graph rollouts, and experiment commands.
 
-Choose **Experience Transition Graph** to inspect each of the six scenarios separately. The default view expands one hop with up to six neighbors per state; rendering is capped at 24 nodes and 60 edges. Use the controls to explore a larger neighborhood.
+Choose **Experience Transition Graph** to inspect each of the six scenarios separately. The default view starts at abstract state **1** and expands **two hops**, with up to six neighbors per state; rendering is capped at 24 nodes and 60 action transitions. Use the controls to explore a different neighborhood.
 
 ## Fresh Graph-only and Full SAGE experiments
 
-Install the SC2 environment separately with **Python 3.8.10** and `requirements-sc2.txt`; see [the complete instructions](ARTIFACT.md#fresh-sc2-evaluations). The launcher reads the six maps directly from `assets/maps/`, without editing PySC2 or registering custom maps in its package.
+Install the SC2 environment separately with **Python 3.8.10** and `requirements-sc2.txt`; see [the installation steps](ARTIFACT.md#fresh-sc2-evaluations). The launcher reads the six maps directly from `assets/maps/`, without editing PySC2 or registering custom maps in its package.
 
 ```bash
 # In the SC2 environment, verify two episodes and the reset between them:
@@ -61,7 +61,3 @@ data/                        Augmented BK-Trees/state maps and older trajectory 
 assets/maps/                 Six scenario maps
 tests/                       Evidence, launcher, asset and Web checks
 ```
-
-The curated manifest covers about **1.98 GB**. Four dense distance archives expand once to about **2.26 GB** of ignored local cache; 8v8 scenarios use sparse indices. Reserve at least **8 GB free disk space**, plus SC2 and Python environments, and preferably **8 GB RAM**. Offline checks take a few minutes depending on CPU/storage.
-
-Project code uses the [MIT license](LICENSE). External software and maps retain their applicable terms. Cite the accepted SAGE paper and the exact artifact revision used.
