@@ -7,7 +7,7 @@ Beam search + finetune model collaborative online learning.
 All trials share one evolving finetune model, updated every step.
 
 Usage:
-    python scripts/finetune_trainer.py --n_trials 20 --episodes_per_trial 100 --kg_file ... --data_dir ...
+    python scripts/finetune_trainer.py --n_trials 20 --episodes_per_trial 100 --etg_file ... --data_dir ...
 """
 
 import sys
@@ -139,7 +139,7 @@ class FinetuneTrainer:
         self._proc = None
         self._finetune_id = 0
         self._sample_dir: Optional[Path] = None
-        self._kg_file = config.get("kg_file")
+        self._etg_file = config.get("etg_file")
         self._data_dir = config.get("data_dir")
         self._map_key = config.get("map_key")
         self._reward_mode = config.get("reward_mode", "hp_episodic")
@@ -242,7 +242,7 @@ class FinetuneTrainer:
             "trial_number": trial.number,
             "finetune_model_path": shared_model_path,
             "reward_mode": self._reward_mode,
-            "kg_file": self._kg_file,
+            "etg_file": self._etg_file,
             "data_dir": self._data_dir,
         }
 
@@ -373,25 +373,25 @@ class FinetuneTrainer:
             except Exception:
                 pass
 
-        _kg_file = self._kg_file or game_cfg.get("kg_file")
+        _etg_file = self._etg_file or game_cfg.get("etg_file")
         _data_dir = self._data_dir or game_cfg.get("data_dir")
         _map_key = self._map_key or game_cfg.get("map_key", "sce-1")
-        if not _kg_file or not _data_dir:
+        if not _etg_file or not _data_dir:
             print("=" * 60)
             print("[ERROR] ETG parameters required but not provided:")
-            print(f"  --kg_file  = {_kg_file!r}")
+            print(f"  --etg_file  = {_etg_file!r}")
             print(f"  --data_dir = {_data_dir!r}")
             print()
             print("  Usage:")
             print(
                 "    python scripts/finetune_trainer.py"
                 " --n_trials 20"
-                " --kg_file MarineMicro_MvsM_4_augmented/kg_simple.pkl"
+                " --etg_file MarineMicro_MvsM_4_augmented/etg_simple.pkl"
                 " --data_dir data/MarineMicro_MvsM_4/augmented_1"
             )
             print("=" * 60)
             raise RuntimeError(
-                "ETG parameters (--kg_file and --data_dir) are required. "
+                "ETG parameters (--etg_file and --data_dir) are required. "
                 "Aborting without starting SC2 process."
             )
 
@@ -408,8 +408,8 @@ class FinetuneTrainer:
             "0",
             "--autopilot_mode",
             game_cfg.get("autopilot_mode", "multi_step"),
-            "--kg_file",
-            _kg_file,
+            "--etg_file",
+            _etg_file,
             "--data_dir",
             _data_dir,
         ]
@@ -438,19 +438,19 @@ class FinetuneTrainer:
             self._proc.terminate()
             raise RuntimeError("server startup timeout")
 
-        if _kg_file:
+        if _etg_file:
             try:
                 requests.post(
-                    f"http://127.0.0.1:{port}/game/load_kg",
+                    f"http://127.0.0.1:{port}/game/load_etg",
                     json={
-                        "kg_file": _kg_file,
+                        "etg_file": _etg_file,
                         "data_dir": _data_dir,
                     },
                     timeout=30,
                 )
-                print(f"  KG loaded: {_kg_file}")
+                print(f"  ETG loaded: {_etg_file}")
             except requests.RequestException as e:
-                print(f"  [WARN] KG load failed: {e}")
+                print(f"  [WARN] ETG load failed: {e}")
 
     def _shutdown(self):
         if self._port:
@@ -481,7 +481,7 @@ def main():
     parser.add_argument(
         "--target_visits", type=int, default=10, help="confidence target"
     )
-    parser.add_argument("--kg_file", type=str, default=None, help="KG pickle file")
+    parser.add_argument("--etg_file", type=str, default=None, help="ETG pickle file")
     parser.add_argument("--data_dir", type=str, default=None, help="Training data dir")
     parser.add_argument("--map_key", type=str, default=None, help="Map config key")
     parser.add_argument(
@@ -498,7 +498,7 @@ def main():
         "episodes_per_trial": args.episodes_per_trial,
         "sigma": args.sigma,
         "target_visits": args.target_visits,
-        "kg_file": args.kg_file,
+        "etg_file": args.etg_file,
         "data_dir": args.data_dir,
         "map_key": args.map_key,
         "reward_mode": args.reward_mode,

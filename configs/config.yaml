@@ -1,10 +1,6 @@
-defaults:
-  - model: decision_transformer
-  - env: starcraft
-  - experiment: default
-  - _self_
+# Compatibility values for legacy get_config() callers. That loader uses plain
+# YAML and never composes Hydra model/experiment defaults. Paper SAGE reads its
+# recorded startup parameters through scripts/run_paper_sage.py; the Web uses
+# etg_catalog.yaml. This file supplies general helper defaults.
 
 seed: 42
-device: cuda
-
-mode: train

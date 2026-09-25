@@ -1,101 +1,67 @@
 # SAGE
 
-**Switch-Aware Graph Planning Integrated with Gated Exploration on Unseen States for RTS Micromanagement**
+**Switch-Aware Graph Planning Integrated with Gated Exploration on Unseen States for RTS Micromanagement** — AIIDE 2026.
 
-SAGE is a research implementation for interpretable real-time strategy (RTS) micromanagement in StarCraft II. It converts offline trajectories into an Experience Transition Graph (ETG), reuses reliable graph evidence through switch-aware beam planning, and invokes gated local exploration only when an observation is uncertain or unseen.
+[Artifact and experiment guide](ARTIFACT.md) · [Paper figure/table inputs](paper_assets/aiide26_sage/README.md)
 
-This implementation accompanies the AIIDE 2026 submission *SAGE: Switch-Aware Graph Planning Integrated with Gated Exploration on Unseen States for RTS Micromanagement*.
+SAGE stores offline experience in an **Experience Transition Graph (ETG)**. **Graph-only SAGE** uses switch-aware graph planning. **Full SAGE** adds a local action-value model and evidence gates for uncertain or unseen observations. This artifact provides both implementations, frozen runtime assets, archived SAGE evaluations, and a local Streamlit explorer.
 
-## Highlights
+External methods are supplied as explicitly attributed **paper-reported reference values**. These values are stored alongside the SAGE evaluation data in the paper assets directory.
 
-- **Explicit experience graph**: abstracts trajectories with a cluster-centric BK-Tree and stores state-action transition evidence in an ETG.
-- **Switch-aware planning**: performs inter-track beam search and can switch to compatible historical states when exact reuse is not appropriate.
-- **Gated exploration**: keeps online evidence separate from the base graph and permits UCB-style action correction only after sufficient local support.
-- **Reproducible scenarios**: includes the six Marine micromanagement maps and lightweight trajectory/ETG artifacts used by the supplied configurations.
-- **Interactive inspection**: provides a Streamlit interface for graph, planning, rollout, data, live-game, and optimisation views.
+## Quick start: paper evidence and Web
 
-## Repository layout
-
-```text
-SAGE/
-├── assets/maps/              # Six SC2 scenario maps used in the paper
-├── configs/                  # Hydra, ETG catalogue, and learner settings
-├── data/                     # Lightweight baseline data for all six scenarios
-├── cache/knowledge_graph/    # Corresponding baseline ETG artifacts
-├── scripts/                  # Collection, ETG construction, evaluation, and UI entry points
-├── src/                      # SAGE algorithms, SC2 environment, and utilities
-├── ARCHITECTURE.md           # Module and data-flow reference
-└── requirements.txt          # Runtime dependencies
-```
-
-Large raw collections, generated distance matrices, optimisation runs, plots, and intermediate paper material are intentionally excluded. They are not required to inspect the method or run the included baseline artifacts.
-
-## Setup
-
-SAGE has been developed for Python 3.8+ and StarCraft II with PySC2.
+Use Python **3.12**. This workflow runs on CPU and needs neither StarCraft II nor PyTorch. Use a **source checkout with all Git LFS objects**; a wheel or `pip install .` alone is not the artifact.
 
 ```bash
+git lfs install
 git clone https://github.com/BaiChunhui-9803/SAGE.git
 cd SAGE
-
-python -m venv .venv
-# Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-
-pip install -r requirements.txt
-pip install -e ".[live,sc2]"
+# Check out the artifact revision supplied with the submission, then:
+git lfs pull
+python -m venv .venv-artifact
+# Windows: .venv-artifact\Scripts\activate
+# Linux/macOS: source .venv-artifact/bin/activate
+python -m pip install -r requirements-artifact.txt
+python scripts/reproduce_paper.py --figure all
+python -m streamlit run scripts/visualize_etg_web_en.py
 ```
 
-The live SC2 environment also requires a local StarCraft II installation. Copy the supplied maps from `assets/maps/` into the installation's `Maps/` directory (or a subdirectory recognised by your PySC2 setup). See [assets/maps/README.md](assets/maps/README.md) for the scenario mapping.
+The plotting command writes Figures 3–7 to `output/paper_reproduction/figures/`. The explorer provides paper tables and figures, a directory browser for their inputs, graph inspection, beam planning, graph rollouts, and experiment commands.
 
-## Quick start
+Choose **Experience Transition Graph** to inspect each of the six scenarios separately. The default view expands one hop with up to six neighbors per state; rendering is capped at 24 nodes and 60 edges. Use the controls to explore a larger neighborhood.
 
-Start the interactive explorer:
+## Fresh Graph-only and Full SAGE experiments
+
+Install the SC2 environment separately with **Python 3.8.10** and `requirements-sc2.txt`; see [the complete instructions](ARTIFACT.md#fresh-sc2-evaluations). The launcher reads the six maps directly from `assets/maps/`, without editing PySC2 or registering custom maps in its package.
 
 ```bash
-streamlit run scripts/visualize_kg_web.py
+# In the SC2 environment, verify two episodes and the reset between them:
+python scripts/run_paper_sage.py --scenario sce-1 --method graph-only --episodes 2 --run
+python scripts/run_paper_sage.py --scenario sce-1 --method full --episodes 2 --run
+# Omit --run to inspect the prepared settings without starting SC2.
 ```
 
-The release configuration defaults to the included `sce-1` (4v4 Marine) baseline. To run a live game with another included scenario, choose one of `sce-1`, `sce-1m`, `sce-2`, `sce-2m`, `sce-3`, or `sce-3m`:
+Use `--episodes 300` for a new full-length evaluation. Scenario keys are `sce-1`, `sce-1m`, `sce-2`, `sce-2m`, `sce-3`, and `sce-3m`. The wrapper preserves recorded settings, normalizes historical routing tags, and copies Full SAGE's initial model before online updates. Each run has its own logs, parameters, and `completion.json` under `output/paper_live/`.
 
-```bash
-python scripts/run_live_game.py --mode all --map_key sce-1 \
-  --kg_file MarineMicro_MvsM_4/kg_simple.pkl \
-  --data_dir data/MarineMicro_MvsM_4/6
+## Layout and resources
+
+```text
+paper_assets/aiide26_sage/     SAGE logs, selected IDs, models, plot inputs and provenance
+  data/external_methods/     External-method paper references with attribution
+  reference/                 Camera-ready figures and table transcriptions
+scripts/reproduce_paper.py    Offline evidence checks and figure redraws
+scripts/run_paper_sage.py     Fresh Graph-only / Full SAGE evaluations
+scripts/visualize_etg_web_en.py Streamlit explorer entry
+scripts/etg_web/              Shared graph tools and presentation modules
+src/decision/                ETG, beam search, switch-aware rollout and local models
+src/sc2env/                  State/action adapter, SAGE agent, maps and optional Web API
+src/data/, src/structure/    State abstraction, BK-Trees and distance support
+cache/experience_transition_graph/ Frozen graphs and distance assets
+data/                        Augmented BK-Trees/state maps and older trajectory examples
+assets/maps/                 Six scenario maps
+tests/                       Evidence, launcher, asset and Web checks
 ```
 
-Build an ETG from your own collected trajectories:
+The curated manifest covers about **1.98 GB**. Four dense distance archives expand once to about **2.26 GB** of ignored local cache; 8v8 scenarios use sparse indices. Reserve at least **8 GB free disk space**, plus SC2 and Python environments, and preferably **8 GB RAM**. Offline checks take a few minutes depending on CPU/storage.
 
-```bash
-python scripts/build_from_collected.py \
-  --input output/collected_data/<run> \
-  --bktree-dir output/collected_data/<run> \
-  --output-dir cache/knowledge_graph/<name>
-```
-
-## Included scenarios
-
-| Key | StarCraft II map | Units | Variant |
-| --- | --- | ---: | --- |
-| `sce-1` | `local_enemy_test_1` | 4 vs 4 | standard |
-| `sce-1m` | `local_enemy_test_1_mirror` | 4 vs 4 | mirrored |
-| `sce-2` | `MarineMicro_MvsM_4_dist` | 4 vs 4 | distance-shifted |
-| `sce-2m` | `MarineMicro_MvsM_4_dist_mirror` | 4 vs 4 | mirrored, distance-shifted |
-| `sce-3` | `MarineMicro_MvsM_8_far` | 8 vs 8 | larger, far-start |
-| `sce-3m` | `MarineMicro_MvsM_8_far_mirror` | 8 vs 8 | mirrored, far-start |
-
-The map constants are defined in `src/sc2env/config.py`; the ETG catalogue is in `configs/kg_catalog.yaml`.
-
-## Reproducibility notes
-
-- The included `data/` and `cache/knowledge_graph/` directories are compact baseline artifacts, suitable for code inspection and end-to-end examples.
-- Full-scale training/evaluation outputs are excluded from Git because they are generated artifacts and substantially exceed practical repository size.
-- The repository does not redistribute StarCraft II itself. Please ensure that use of the bundled scenario maps complies with the game license and your institution's policies.
-
-## Citation
-
-The accompanying manuscript is under anonymous review. A formal citation will be added after the paper is publicly available. Until then, please cite this repository by its URL and state the commit hash used in your experiments.
-
-## License
-
-This project is released under the [MIT License](LICENSE).
+Project code uses the [MIT license](LICENSE). External software and maps retain their applicable terms. Cite the accepted SAGE paper and the exact artifact revision used.

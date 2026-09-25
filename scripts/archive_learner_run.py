@@ -24,7 +24,7 @@ from src import ROOT_DIR
 
 
 _ALL_DATA_ROOT = ROOT_DIR / "output" / "learner_results" / "all_data"
-_KG_CATALOG_PATH = ROOT_DIR / "configs" / "kg_catalog.yaml"
+_etg_CATALOG_PATH = ROOT_DIR / "configs" / "etg_catalog.yaml"
 _MANIFEST_NAME = "experiment_manifest.json"
 
 
@@ -66,19 +66,19 @@ def _read_yaml(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _kg_catalog_entries() -> list:
-    data = _read_yaml(_KG_CATALOG_PATH)
-    entries = data.get("knowledge_graphs", [])
+def _etg_catalog_entries() -> list:
+    data = _read_yaml(_etg_CATALOG_PATH)
+    entries = data.get("experience_transition_graphs", [])
     return entries if isinstance(entries, list) else []
 
 
-def _find_catalog_entry(kg_file: str = "", data_dir: str = "") -> Optional[Dict[str, Any]]:
-    kg_file_norm = str(kg_file or "").replace("\\", "/")
+def _find_catalog_entry(etg_file: str = "", data_dir: str = "") -> Optional[Dict[str, Any]]:
+    etg_file_norm = str(etg_file or "").replace("\\", "/")
     data_dir_norm = str(data_dir or "").replace("\\", "/")
-    for entry in _kg_catalog_entries():
+    for entry in _etg_catalog_entries():
         entry_file = str(entry.get("file", "")).replace("\\", "/")
         entry_data = str(entry.get("data_dir", "")).replace("\\", "/")
-        if kg_file_norm and entry_file == kg_file_norm:
+        if etg_file_norm and entry_file == etg_file_norm:
             return entry
         if data_dir_norm and entry_data == data_dir_norm:
             return entry
@@ -95,7 +95,7 @@ def _parse_log_config(run_dir: Path) -> Dict[str, Any]:
         return {}
     result: Dict[str, Any] = {}
     patterns = {
-        "kg_file": r"KG file:\s*(.+)",
+        "etg_file": r"ETG file:\s*(.+)",
         "data_dir": r"data dir:\s*(.+)",
         "action_tuning": r"action_tuning:\s*(enabled|disabled)",
         "run_dir": r"run dir:\s*(.+)",
@@ -135,10 +135,10 @@ def _detect_method_group(cfg: Dict[str, Any], log_cfg: Dict[str, Any]) -> Tuple[
             "MCTS/UCB ActionTuning",
         )
     return (
-        "ETG-only",
+        "etg-only",
         "etg",
         "etg_only_baseline",
-        "ETG-only Beam Search",
+        "etg-only Beam Search",
     )
 
 
@@ -183,9 +183,9 @@ def build_manifest(
     game_cfg = cfg.get("game") or {}
     bktree_cfg = cfg.get("bktree") or {}
 
-    kg_file = str(game_cfg.get("kg_file") or log_cfg.get("kg_file") or "")
+    etg_file = str(game_cfg.get("etg_file") or log_cfg.get("etg_file") or "")
     data_dir = str(game_cfg.get("data_dir") or log_cfg.get("data_dir") or "")
-    catalog_entry = _find_catalog_entry(kg_file, data_dir) or {}
+    catalog_entry = _find_catalog_entry(etg_file, data_dir) or {}
     map_key = str(game_cfg.get("map_key") or catalog_entry.get("map_key") or "")
     map_id = str(catalog_entry.get("map_id") or "")
     if not map_id and data_dir:
@@ -216,7 +216,7 @@ def build_manifest(
         data_type.lower() == "augmented"
         or data_id.startswith("augmented")
         or "augmented" in data_dir.replace("\\", "/").lower()
-        or "augmented" in kg_file.replace("\\", "/").lower()
+        or "augmented" in etg_file.replace("\\", "/").lower()
     )
 
     primary_threshold = bktree_cfg.get("primary_threshold")
@@ -236,8 +236,8 @@ def build_manifest(
         "map_id": map_id,
         "experiment_type": experiment_type,
         "method": method,
-        "kg_name": catalog_entry.get("name", ""),
-        "kg_file": kg_file,
+        "etg_name": catalog_entry.get("name", ""),
+        "etg_file": etg_file,
         "transitions": catalog_entry.get("transitions", ""),
         "data_dir": data_dir,
         "dataset_type": data_type or ("augmented" if replay_expansion else "unknown"),

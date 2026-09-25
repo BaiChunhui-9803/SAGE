@@ -1,0 +1,235 @@
+{
+  "experiment_dir": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075",
+  "output_dir": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137",
+  "experiment_id": "sce2_synergy_run_0075",
+  "method": "ETG + MCTS ActionTuning",
+  "experiment_type": "three_phase_synergy",
+  "map_key": "sce-2",
+  "map_id": "MarineMicro_MvsM_4_dist",
+  "kg_file": "MarineMicro_MvsM_4_dist_augmented/kg_simple.pkl",
+  "data_dir": "data/MarineMicro_MvsM_4_dist/augmented_1",
+  "best_trial": 41,
+  "best_value": 70.30541143913374,
+  "episodes_per_repeat": 300,
+  "requested_repeats": 1,
+  "action_tuning_enabled": true,
+  "action_tuning_model": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\action_tuning_model.pkl",
+  "param_injection": "startup_beam_params_file",
+  "eval_bktree_mode": "fresh_eval",
+  "eval_bktree_state_id_mode": "local_compact",
+  "eval_bktree_normalization": "decision",
+  "mechanism_shadow_logging": true,
+  "planning_switch_logging": true,
+  "beam_param_overrides": {},
+  "batch_tag": "web_batch_20260622_141137",
+  "force_initial_debug_spawn": false,
+  "reset_between_episodes": false,
+  "validate_manual_spawn": false,
+  "eval_bktree_outputs": [
+    "repeats/<repeat_id>/bktree/node_log.txt",
+    "repeats/<repeat_id>/bktree/state_node.txt",
+    "repeats/<repeat_id>/bktree/primary_bktree.json",
+    "repeats/<repeat_id>/bktree/secondary_bktree_*.json",
+    "repeats/<repeat_id>/episode_start_state_validation.json",
+    "repeats/<repeat_id>/episode_start_state_validation.csv"
+  ],
+  "seed_control": "not_available_in_current_sc2_launcher",
+  "started_at": "2026-06-22 14:39:17",
+  "status": "completed",
+  "completed_at": "2026-06-22 14:42:50",
+  "repeats": [
+    {
+      "repeat": 1,
+      "target_episodes": 300,
+      "params": {
+        "beam_width": 8,
+        "lookahead_steps": 2,
+        "score_mode": "quality",
+        "action_strategy": "highest_transition_prob",
+        "mode": "multi_step",
+        "min_visits": 6,
+        "max_state_revisits": 4,
+        "min_cum_prob": 0.003960700888824993,
+        "discount_factor": 0.564843200093434,
+        "enable_backup": false,
+        "backup_score_threshold": 0.3,
+        "backup_distance_threshold": 0.2,
+        "epsilon": 0.1,
+        "masked_actions": [
+          "0g",
+          "1g",
+          "2g",
+          "3g",
+          "4g",
+          "0e",
+          "1e",
+          "2e",
+          "3e",
+          "4e",
+          "0a",
+          "1a",
+          "2a",
+          "3a",
+          "4a"
+        ],
+        "tuning_ood_key_mode": "aggregate",
+        "tuning_ood_distance_bucket": 0.5,
+        "synergy_etg_source_trial": 8,
+        "synergy_etg_source_value": 73.73170731707317,
+        "enable_action_tuning": true,
+        "tuning_force_explore": false,
+        "tuning_explore_ood": false,
+        "tuning_etg_first": true,
+        "tuning_etg_protected_sources": [
+          "kg_plan",
+          "kg_follow"
+        ],
+        "exclude_from_parameter_optimization": false,
+        "tuning_explore_rate": 0.0,
+        "tuning_explore_sources": [],
+        "tuning_validation_sources": [
+          "ood",
+          "fallback",
+          "kg_relaxed",
+          "fuzzy_plan",
+          "diverge"
+        ],
+        "tuning_validation_min_confidence": 0.1,
+        "tuning_validation_min_advantage": 0.0,
+        "tuning_validation_min_visits": 2,
+        "tuning_validation_profiles": {
+          "diverge": {
+            "min_advantage": 0.5,
+            "min_confidence": 0.15,
+            "min_visits": 3
+          },
+          "fallback": {
+            "min_advantage": 0.0,
+            "min_confidence": 0.08,
+            "min_visits": 2
+          },
+          "fuzzy_plan": {
+            "min_advantage": 0.5,
+            "min_confidence": 0.15,
+            "min_visits": 3
+          },
+          "kg_relaxed": {
+            "min_advantage": 0.5,
+            "min_confidence": 0.15,
+            "min_visits": 3
+          },
+          "ood": {
+            "min_advantage": 0.0,
+            "min_confidence": 0.08,
+            "min_visits": 2
+          }
+        },
+        "phase": "synergy",
+        "bktree_primary_threshold": 0.7,
+        "bktree_secondary_threshold": 0.5,
+        "local_result_dir": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001",
+        "target_episodes": 300,
+        "trial_number": 1,
+        "plan_log_path": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001\\plan.log",
+        "eval_bktree_mode": "fresh_eval",
+        "eval_bktree_source_mode": "fresh",
+        "eval_bktree_id_mode": "local_compact",
+        "eval_bktree_normalization": "decision",
+        "enable_eval_bktree": true,
+        "force_initial_debug_spawn": false,
+        "reset_between_episodes": false,
+        "validate_manual_spawn": false,
+        "stop_when_target_reached": true,
+        "enable_mechanism_shadow_logging": true,
+        "enable_planning_switch_logging": true,
+        "planning_switch_score_threshold": 0.0,
+        "planning_switch_max_per_fork": 6,
+        "planning_switch_max_candidates": 24,
+        "action_tuning_model_path": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001\\action_tuning_model.pkl"
+      },
+      "start_time": "2026-06-22 14:39:17",
+      "status": "completed",
+      "completed_episodes": 300,
+      "end_time": "2026-06-22 14:42:50",
+      "metrics": {
+        "win_rate": 0.97,
+        "avg_score": 65.17,
+        "score_std": 20.442629478616492,
+        "stability": 1.8845910527908776,
+        "num_episodes": 300,
+        "penalty_factor": 0.9528852236802281,
+        "objective": 60.236544126423254
+      },
+      "mechanism_shadow_summary": {
+        "status": "ok",
+        "frame_csv": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001\\mechanism_shadow_frames.csv",
+        "state_csv": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001\\mechanism_shadow_state_summary.csv",
+        "total_shadow_frames": 3871,
+        "changed_frames": 269,
+        "ood_shadow_frames": 199,
+        "unique_shadow_states": 1122,
+        "note": "observed_selected_next_hp_gain is the realized next-frame HP-margin change after the actually executed action. The baseline action is logged as a shadow decision and does not have same-branch outcome unless paired replay is added."
+      },
+      "planning_switch_candidate_summary": {
+        "status": "ok",
+        "candidate_csv": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\repeats\\repeat_001\\planning_switch_candidates.csv",
+        "candidate_rows": 27547,
+        "plan_frames": 2640,
+        "unique_plans": 2462,
+        "switched_frames": 0,
+        "diverged_frames": 1482,
+        "mean_planning_score_gain": -0.0025602917951973447,
+        "positive_planning_score_gain_ratio": 0.0,
+        "mean_planning_future_reward_gain": -1.4818657512614808,
+        "positive_future_reward_gain_ratio": 0.018876828692779613,
+        "note": "Rows are planning-time backup continuation candidates logged from beam paths. planning_*_gain compares a backup path with the selected main path inside the same beam plan."
+      }
+    }
+  ],
+  "aggregate": {
+    "win_rate": {
+      "mean": 0.97,
+      "std": 0.0,
+      "ci95": null
+    },
+    "avg_score": {
+      "mean": 65.17,
+      "std": 0.0,
+      "ci95": null
+    },
+    "score_std": {
+      "mean": 20.442629478616492,
+      "std": 0.0,
+      "ci95": null
+    },
+    "stability": {
+      "mean": 1.8845910527908776,
+      "std": 0.0,
+      "ci95": null
+    },
+    "objective": {
+      "mean": 60.236544126423254,
+      "std": 0.0,
+      "ci95": null
+    },
+    "penalty_factor": {
+      "mean": 0.9528852236802281,
+      "std": 0.0,
+      "ci95": null
+    },
+    "total_episodes": 300,
+    "total_wins": 291,
+    "repeat_count": 1
+  },
+  "incomplete_repeat_count": 0,
+  "start_state_validation": {
+    "status": "pass",
+    "baseline_count": 6,
+    "report_json": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\start_state_validation.json",
+    "report_md": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\start_state_validation.md",
+    "episode_start_report_json": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\episode_start_state_validation.json",
+    "episode_start_report_csv": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\episode_start_state_validation.csv",
+    "episode_start_analysis_json": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\episode_start_state_analysis.json",
+    "episode_start_analysis_csv": "C:\\Users\\Binich\\PycharmProjects\\PredictionRTS\\output\\learner_results\\all_data\\synergy\\sce2_synergy_run_0075\\final_eval\\eval_run_0075_web_batch_20260622_141137\\episode_start_state_analysis.csv"
+  }
+}

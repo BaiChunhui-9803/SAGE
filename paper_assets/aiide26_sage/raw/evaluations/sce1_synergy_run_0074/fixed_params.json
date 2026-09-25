@@ -1,0 +1,85 @@
+{
+  "beam_width": 2,
+  "lookahead_steps": 9,
+  "score_mode": "future_reward",
+  "action_strategy": "best_subtree_quality",
+  "mode": "multi_step",
+  "min_visits": 6,
+  "max_state_revisits": 3,
+  "min_cum_prob": 0.001412957314796359,
+  "discount_factor": 0.7383575390422583,
+  "enable_backup": true,
+  "backup_score_threshold": 0.4704432873079989,
+  "backup_distance_threshold": 0.2703453518576587,
+  "epsilon": 0.1,
+  "masked_actions": [
+    "0g",
+    "1g",
+    "2g",
+    "3g",
+    "4g",
+    "0i",
+    "1i",
+    "2i",
+    "3i",
+    "4i",
+    "0a",
+    "1a",
+    "2a",
+    "3a",
+    "4a"
+  ],
+  "tuning_ood_key_mode": "aggregate",
+  "tuning_ood_distance_bucket": 0.5,
+  "synergy_etg_source_trial": 1,
+  "synergy_etg_source_value": 54.09,
+  "enable_action_tuning": true,
+  "tuning_force_explore": false,
+  "tuning_explore_ood": false,
+  "tuning_etg_first": true,
+  "tuning_etg_protected_sources": [
+    "kg_plan",
+    "kg_follow"
+  ],
+  "exclude_from_parameter_optimization": false,
+  "tuning_explore_rate": 0.0,
+  "tuning_explore_sources": [],
+  "tuning_validation_sources": [
+    "ood",
+    "fallback",
+    "kg_relaxed",
+    "fuzzy_plan",
+    "diverge"
+  ],
+  "tuning_validation_min_confidence": 0.1,
+  "tuning_validation_min_advantage": 0.0,
+  "tuning_validation_min_visits": 2,
+  "tuning_validation_profiles": {
+    "diverge": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "fallback": {
+      "min_advantage": 0.0,
+      "min_confidence": 0.08,
+      "min_visits": 2
+    },
+    "fuzzy_plan": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "kg_relaxed": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "ood": {
+      "min_advantage": 0.0,
+      "min_confidence": 0.08,
+      "min_visits": 2
+    }
+  },
+  "phase": "synergy"
+}

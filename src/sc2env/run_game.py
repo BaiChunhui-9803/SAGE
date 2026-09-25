@@ -17,6 +17,7 @@ from src.sc2env.config import get_map_config
 from src.sc2env.agent import SmartAgent, Agent
 from src.sc2env.utils import GameContext, init_game
 from src.sc2env.bridge import GameBridge
+from src.sc2env.maps import BundledSAGEMap
 
 _MAP_CONFIG, _MAP, _ENV_CONFIG, _ALG_CONFIG, _PATH_CONFIG = get_map_config("sce-1")
 os.environ["LOKY_MAX_CPU_COUNT"] = "4"
@@ -40,13 +41,13 @@ def _apply_map_config(map_key: str):
         agent_module._ALG_CONFIG = _ALG_CONFIG
         agent_module._PATH_CONFIG = _PATH_CONFIG
 
-    kg_agent_module = sys.modules.get("src.sc2env.kg_guided_agent")
-    if kg_agent_module is not None:
-        kg_agent_module._MAP_CONFIG = _MAP_CONFIG
-        kg_agent_module._MAP = _MAP
-        kg_agent_module._ENV_CONFIG = _ENV_CONFIG
-        kg_agent_module._ALG_CONFIG = _ALG_CONFIG
-        kg_agent_module._PATH_CONFIG = _PATH_CONFIG
+    etg_agent_module = sys.modules.get("src.sc2env.etg_guided_agent")
+    if etg_agent_module is not None:
+        etg_agent_module._MAP_CONFIG = _MAP_CONFIG
+        etg_agent_module._MAP = _MAP
+        etg_agent_module._ENV_CONFIG = _ENV_CONFIG
+        etg_agent_module._ALG_CONFIG = _ALG_CONFIG
+        etg_agent_module._PATH_CONFIG = _PATH_CONFIG
 
     replay_module = sys.modules.get("src.sc2env.replay_collector")
     if replay_module is not None:
@@ -468,7 +469,8 @@ def run_loop_custom(
 
                 total_frames += 1
 
-                timesteps[0].set_test_flag(global_test_flag)
+                # Evaluation state belongs to the agent, not PySC2's immutable TimeStep.
+                agents[0]._test_flag = global_test_flag
 
                 agent_actions = [
                     agent.step(timestep, env)
@@ -733,7 +735,7 @@ def run_game(
     beam_params: Optional[dict] = None,
     replay_actions: Optional[list] = None,
     replay_runs: int = 1,
-    kg_file: Optional[str] = None,
+    etg_file: Optional[str] = None,
     action_strategy: str = "best_beam",
     batch_replay_count: int = 3,
     batch_start: int = 0,
@@ -745,7 +747,7 @@ def run_game(
     override_model_path: Optional[str] = None,
     cf_config: Optional[dict] = None,
     cf_runs: int = 1,
-    load_kg: bool = True,
+    load_etg: bool = True,
 ):
     _apply_map_config(map_key)
     steps = _ENV_CONFIG["_MAX_STEP"]
@@ -770,8 +772,8 @@ def run_game(
             primary_threshold=primary_threshold,
             secondary_threshold=secondary_threshold,
         )
-    elif agent_type == "kg_guided" and bridge is not None:
-        from src.sc2env.kg_guided_agent import KGGuidedAgent
+    elif agent_type == "etg_guided" and bridge is not None:
+        from src.sc2env.etg_guided_agent import ETGGuidedAgent
 
         _apply_map_config(map_key)
 
@@ -867,41 +869,41 @@ def run_game(
             _sn_display = _sn_path if _sn_path else "augmented path (not found)"
             print(f"[run_game] Warning: state_node.txt not found ({_sn_display})")
 
-        _kg = None
+        _etg = None
         _transitions = None
         _dist_matrix = None
-        if data_dir and load_kg:
+        if data_dir and load_etg:
             from src import ROOT_DIR as _ROOT
             import pickle as _pickle
 
-            _kg_dir = _ROOT / "cache" / "knowledge_graph"
-            _kg_file = None
-            if kg_file:
-                _kg_file = str(_kg_dir / kg_file)
-                if not os.path.exists(_kg_file):
+            _etg_dir = _ROOT / "cache" / "experience_transition_graph"
+            _etg_file = None
+            if etg_file:
+                _etg_file = str(_etg_dir / etg_file)
+                if not os.path.exists(_etg_file):
                     print(
-                        f"[run_game] Warning: Specified KG file not found: {_kg_file}"
+                        f"[run_game] Warning: Specified ETG file not found: {_etg_file}"
                     )
-                    _kg_file = None
-            if _kg_file is None and _kg_dir.exists():
+                    _etg_file = None
+            if _etg_file is None and _etg_dir.exists():
                 for _pkl in sorted(
-                    (p for p in _kg_dir.rglob("*.pkl") if "_transitions" not in p.name),
+                    (p for p in _etg_dir.rglob("*.pkl") if "_transitions" not in p.name),
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
                 ):
-                    _kg_file = str(_pkl)
-                    print(f"[run_game] Auto-discovered KG: {_kg_file}")
+                    _etg_file = str(_pkl)
+                    print(f"[run_game] Auto-discovered ETG: {_etg_file}")
                     break
-            if _kg_file:
+            if _etg_file:
                 try:
-                    from src.decision.knowledge_graph import DecisionKnowledgeGraph
+                    from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
 
-                    _kg = DecisionKnowledgeGraph.load(_kg_file)
-                    print(f"Loaded KG from {_kg_file}")
+                    _etg = DecisionExperienceTransitionGraph.load(_etg_file)
+                    print(f"Loaded ETG from {_etg_file}")
                 except Exception as e:
-                    print(f"Warning: Failed to load KG: {e}")
+                    print(f"Warning: Failed to load ETG: {e}")
             _trans_path = (
-                _kg_file.replace(".pkl", "_transitions.pkl") if _kg_file else ""
+                _etg_file.replace(".pkl", "_transitions.pkl") if _etg_file else ""
             )
             if _trans_path and os.path.exists(_trans_path):
                 try:
@@ -913,56 +915,21 @@ def run_game(
             _dp = Path(data_dir)
             if len(_dp.parts) >= 2:
                 _map_id, _data_id = _dp.parts[-2], _dp.parts[-1]
-                _npy_dir = _ROOT / "cache" / "npy"
-                _dm_path = _npy_dir / f"state_distance_matrix_{_map_id}_{_data_id}.npy"
-                if _dm_path.exists():
-                    try:
-                        import numpy as _np
-
-                        _dist_matrix = _np.load(str(_dm_path), mmap_mode="r")
-                        print(
-                            f"Loaded dist matrix from {_dm_path} ({_dist_matrix.shape}, mmap)"
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to load dist matrix: {e}")
+                from src.utils.distance_assets import load_distances
+                _dist_matrix = load_distances(_map_id, _data_id, _etg_file)
+                if _dist_matrix is None:
+                    print(f"Warning: No archived distances for {data_dir}")
                 else:
-                    print(f"Warning: Distance matrix not found for data_dir={data_dir}: {_dm_path}")
-                    _sparse_candidates = [
-                        _npy_dir
-                        / f"state_sparse_neighbors_{_map_id}_{_data_id}.pkl",
-                    ]
-                    if _kg_file:
-                        _sparse_candidates.extend(
-                            [
-                                Path(_kg_file).parent / "sparse_neighbors.pkl",
-                                Path(_kg_file).parent / "npy" / "sparse_neighbors.pkl",
-                            ]
-                        )
-                    for _sp_path in _sparse_candidates:
-                        if not _sp_path.exists():
-                            continue
-                        try:
-                            from src.decision.sparse_distance_index import (
-                                load_sparse_distance_index,
-                            )
+                    print(f"Loaded distances for {_map_id}/{_data_id}")
+        elif data_dir and not load_etg:
+            print("[run_game] Skipping etg/transitions/distance loading (load_etg=False)")
 
-                            _dist_matrix = load_sparse_distance_index(str(_sp_path))
-                            print(
-                                f"Loaded sparse distance index from {_sp_path} "
-                                f"({len(_dist_matrix.neighbors)} states, top_k={_dist_matrix.top_k})"
-                            )
-                            break
-                        except Exception as e:
-                            print(f"Warning: Failed to load sparse distance index: {e}")
-        elif data_dir and not load_kg:
-            print("[run_game] Skipping ETG/transitions/distance loading (load_kg=False)")
-
-        agent1 = KGGuidedAgent(
+        agent1 = ETGGuidedAgent(
             bridge=bridge,
             fallback_action=fallback_action,
             initial_bktree_data=bktree_data,
             state_id_map=state_id_map,
-            kg=_kg,
+            ETG=_etg,
             transitions=_transitions,
             dist_matrix=_dist_matrix,
             mode=autopilot_mode,
@@ -971,7 +938,7 @@ def run_game(
             replay_runs=replay_runs,
             action_strategy=action_strategy,
             data_dir=data_dir,
-            kg_file=kg_file,
+            etg_file=etg_file,
             override_model_path=override_model_path,
             cf_config=cf_config,
             bktree_primary_threshold=primary_threshold,
@@ -982,7 +949,7 @@ def run_game(
 
     try:
         with sc2_env.SC2Env(
-            map_name=_MAP["map_name"],
+            map_name=BundledSAGEMap(map_key),
             players=[
                 sc2_env.Agent(sc2_env.Race.terran),
                 sc2_env.Bot(sc2_env.Race.terran, sc2_env.Difficulty.very_hard),

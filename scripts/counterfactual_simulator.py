@@ -1,16 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-CounterfactualSimulator -- 反事实动作覆盖模拟编排器
+"""Optional historical counterfactual simulation orchestration.
 
-从参数寻优的差 episode 中识别关键决策点，启动独立游戏实例执行
-反事实模拟（重放 + 动作替换 + beam search 接管），评估替换收益，
-更新 ActionOverrideModel。
-
-Usage:
-    Called by parameter_learner.py during finetune phases.
-    Can also be run standalone for testing.
-"""
+Identifies decisions in low-scoring episodes, replays actions in separate game
+instances, substitutes an action, and resumes beam search to measure the effect.
+Updates ActionOverrideModel. Called by parameter_learner.py in finetune phases;
+also usable as a standalone tool. This is outside the frozen SAGE evaluation."""
 
 from __future__ import annotations
 
@@ -327,7 +322,7 @@ class CounterfactualSimulator:
                 hp_delta = frame.get("hp_delta", 0)
 
                 priority = 0
-                if action_source == "kg_plan" and hp_delta < -10:
+                if action_source == "etg_plan" and hp_delta < -10:
                     priority = 3
                 elif (
                     frame.get("my_count", 0) > frame.get("enemy_count", 0)
@@ -338,7 +333,7 @@ class CounterfactualSimulator:
                 elif action_source in (
                     "fallback",
                     "ft_plan",
-                    "kg_relaxed",
+                    "etg_relaxed",
                     "fuzzy_plan",
                 ):
                     priority = 1
@@ -453,8 +448,8 @@ class CounterfactualSimulator:
                 "--cf_runs",
                 str(cf_runs),
             ]
-            if game.get("kg_file"):
-                cmd.extend(["--kg_file", game["kg_file"]])
+            if game.get("etg_file"):
+                cmd.extend(["--etg_file", game["etg_file"]])
             if game.get("data_dir"):
                 cmd.extend(["--data_dir", game["data_dir"]])
 

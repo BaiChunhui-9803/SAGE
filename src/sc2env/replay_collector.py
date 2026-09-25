@@ -1,17 +1,9 @@
 #!/usr/bin/env python
-"""
-ReplayCollector: 批量回放 action 序列，收集 norm_state 数据并增量构建 BKTree。
+"""Collect normalized states by replaying action sequences through SmartAgent.
 
-继承 SmartAgent，复用其 BKTree 和动作执行能力，
-在 step() 中只做：获取 norm_state → 聚类 → 执行 action → 记录帧。
-
-不执行 Q-learning、不写文件、不依赖 KG/transitions/beam search。
-
-支持增量保存与中断恢复：
-- 每 episode 完成后立即 pickle append 到增量文件
-- 每 5% 进度保存 BKTree checkpoint
-- progress.json 记录已完成 episode，支持从中断处恢复
-"""
+Each step observes, clusters, executes, and records a frame without Q-learning
+or graph planning. Completed episodes are appended to an incremental pickle;
+BK-Tree checkpoints and progress.json support recovery after interruption."""
 
 import os
 import sys
@@ -145,7 +137,7 @@ class ReplayCollector(SmartAgent):
             self._replay_actions = []
             self._replay_idx = 0
 
-    # ── 增量保存与恢复 ──────────────────────────────────────────────
+    # Incremental persistence and recovery.
 
     def _init_incremental_save(self):
         output_dir = Path(self._output_dir)
@@ -321,7 +313,7 @@ class ReplayCollector(SmartAgent):
             print(f"[ReplayCollector] Warning: 增量写入失败 ({e})")
             return False
 
-    # ── 核心逻辑 ─────────────────────────────────────────────────────
+    # Core execution logic.
 
     def get_state_cluster(self, norm_state):
         if self.primary_bktree.root is None:

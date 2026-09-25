@@ -1,17 +1,9 @@
-"""
-FinetuneModel — 基于置信度的状态微调机
+"""Optional historical state-tuning model using a Q-table and k-NN smoothing.
 
-模型存储: Q-Table + k-NN 平滑
-- Q-Table 天然提供 visits/置信度
-- k-NN 平滑解决稀疏状态的泛化问题
-- 复用项目已有的 dist_matrix (N×N 对称距离矩阵)
-
-双指标: replacement_score = confidence * (1 - action_rank)
-  <0.1    未探索 → 优先探索
-  0.1~0.3 探索不足 → 继续收集
-  0.3~thr 需微调 → 用模型替换 beam search 建议
-  >=thr   置信足够 → 直接用 beam search
-"""
+Uses the existing symmetric state-distance matrix. The replacement score is
+confidence * (1 - action_rank): below 0.1 prioritizes exploration; 0.1-0.3 gathers
+more evidence; 0.3 to the threshold permits replacement; above the threshold
+retains the beam-search recommendation. This is not the Full SAGE tuning model."""
 
 from __future__ import annotations
 

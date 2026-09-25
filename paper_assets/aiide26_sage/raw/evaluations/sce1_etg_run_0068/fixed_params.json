@@ -1,0 +1,31 @@
+{
+  "beam_width": 9,
+  "lookahead_steps": 9,
+  "score_mode": "future_reward",
+  "action_strategy": "best_subtree_quality",
+  "mode": "multi_step",
+  "min_visits": 6,
+  "max_state_revisits": 2,
+  "min_cum_prob": 0.08439877699268711,
+  "discount_factor": 0.557390288820505,
+  "enable_backup": true,
+  "backup_score_threshold": 0.3262890220739224,
+  "backup_distance_threshold": 0.8487056299188495,
+  "epsilon": 0.1,
+  "masked_actions": [
+    "0i",
+    "1i",
+    "2i",
+    "3i",
+    "4i"
+  ],
+  "tuning_ood_key_mode": "aggregate",
+  "tuning_ood_distance_bucket": 0.5,
+  "enable_action_tuning": false,
+  "tuning_force_explore": false,
+  "tuning_explore_ood": false,
+  "exclude_from_parameter_optimization": false,
+  "tuning_explore_rate": 0.0,
+  "tuning_explore_sources": [],
+  "phase": "etg_only"
+}

@@ -2,7 +2,7 @@
 
 The ETG runtime currently consumes compact script codes such as ``4c``.  PyMARL
 policies instead emit one primitive action per agent.  This adapter keeps the
-ETG-facing action space stable by assigning each micro-action pattern to the
+etg-facing action space stable by assigning each micro-action pattern to the
 closest existing script action, while preserving confidence and diagnostic
 metadata for later analysis.
 """

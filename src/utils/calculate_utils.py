@@ -8,18 +8,12 @@ from sklearn.manifold import MDS
 from src.utils.load_utils import *
 from src.config.base_config import *
 
-# 获取当前模块的 logger
+# Use a module-specific logger.
 logger = logging.getLogger(__name__)
 
 
 def dtw_distance(seq1, seq2, distance_matrix):
-    """
-    计算两个序列之间的DTW距离
-    :param seq1: 第一个序列
-    :param seq2: 第二个序列
-    :param distance_matrix: 距离矩阵
-    :return: DTW距离
-    """
+    """Compute DTW between seq1 and seq2 using the supplied state-distance matrix."""
     m = len(seq1)
     n = len(seq2)
     dtw_matrix = np.zeros((m + 1, n + 1))
@@ -40,16 +34,14 @@ def dtw_distance(seq1, seq2, distance_matrix):
 
 
 def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees):
-    """
-    计算距离矩阵
-    """
+    """Compute the pairwise state-distance matrix."""
     num_clusters = len(reverse_dict)
-    # 初始化距离矩阵
+    # Initialize the distance matrix.
     distance_matrix = np.zeros((num_clusters, num_clusters))
     clusters = list(reverse_dict.values())
 
     last_output_time = time.time()
-    progress_threshold = 0.01  # 每 1% 更新一次进度
+    progress_threshold = 0.01  # Report progress at one-percent intervals.
 
     logger.info(f"Starting distance matrix calculation for {num_clusters} clusters...")
 
@@ -58,8 +50,8 @@ def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees)
             state1 = clusters[i]["cluster"]
             state2 = clusters[j]["cluster"]
 
-            # 获取两个状态的节点
-            # 建议：这里如果频繁查询，可以考虑先将 node 提取出来缓存
+            # Look up the two state nodes.
+            # Repeated lookups can be reduced by caching the nodes.
             node1 = (
                 secondary_bk_trees[state1[0]].find_node_by_cluster_id(state1[1]).state
             )
@@ -67,20 +59,20 @@ def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees)
                 secondary_bk_trees[state2[0]].find_node_by_cluster_id(state2[1]).state
             )
 
-            # 计算多维距离并转为欧几里得距离
+            # Reduce the distance components to their Euclidean norm.
             dist = custom_distance.multi_distance(node1, node2)
             euclidean_distance = math.sqrt(dist[0] ** 2 + dist[1] ** 2)
 
             distance_matrix[i, j] = euclidean_distance
             distance_matrix[j, i] = euclidean_distance
 
-        # 进度控制
+        # Throttle progress reporting.
         progress = (i + 1) / num_clusters
         if progress >= progress_threshold or i == num_clusters - 1:
             current_time = time.time()
             time_elapsed = current_time - last_output_time
 
-            # 使用 info 记录进度
+            # Log progress at INFO level.
             logger.info(
                 f"Progress: {progress * 100:.1f}% | Processed: {i + 1}/{num_clusters} | Step Time: {time_elapsed:.2f}s"
             )
@@ -160,10 +152,8 @@ def calculate_distance_matrix(reverse_dict, custom_distance, secondary_bk_trees)
 def calculate_and_save_distance_matrix(
     reverse_dict, custom_distance, secondary_bk_trees, distance_matrix_folder
 ):
-    """
-    计算距离矩阵并保存到文件，带日志控制
-    """
-    # 确保文件夹存在
+    """Compute and cache pairwise state distances, with progress logging."""
+    # Create the output directory if necessary.
     if not os.path.exists(distance_matrix_folder):
         try:
             os.makedirs(distance_matrix_folder)
@@ -176,7 +166,7 @@ def calculate_and_save_distance_matrix(
         distance_matrix_folder, "state_distance_matrix.npy"
     )
 
-    # 检查缓存是否存在
+    # Reuse an existing cache.
     if os.path.exists(state_distance_matrix_path):
         logger.info(f"Cache hit. Loading distance matrix: {state_distance_matrix_path}")
         return load_distance_matrix(state_distance_matrix_path)
@@ -203,9 +193,7 @@ def calculate_and_save_distance_matrix(
 
 
 def calculate_dtw_distance_matrix(state_log, distance_matrix):
-    """
-    计算所有序列之间的DTW距离矩阵
-    """
+    """Compute the DTW distance matrix for all sequence pairs."""
     num_sequences = len(state_log)
     dtw_distance_matrix = np.zeros((num_sequences, num_sequences))
 
@@ -222,7 +210,7 @@ def calculate_dtw_distance_matrix(state_log, distance_matrix):
             dtw_distance_matrix[i, j] = dtw_dist
             dtw_distance_matrix[j, i] = dtw_dist
 
-        # 进度记录
+        # Log progress.
         progress = (i + 1) / num_sequences
         if progress >= progress_threshold or i == num_sequences - 1:
             current_time = time.time()
@@ -240,9 +228,7 @@ def calculate_dtw_distance_matrix(state_log, distance_matrix):
 def calculate_and_save_dtw_distance_matrix(
     state_log, distance_matrix, dtw_distance_matrix_folder
 ):
-    """
-    计算DTW距离矩阵并保存到文件，带日志控制
-    """
+    """Compute and cache pairwise DTW distances, with progress logging."""
     if not os.path.exists(dtw_distance_matrix_folder):
         try:
             os.makedirs(dtw_distance_matrix_folder)
@@ -283,9 +269,7 @@ def calculate_and_save_dtw_distance_matrix(
 def get_or_create_mds_coords(
     distance_matrix: np.ndarray, random_state: int = 42
 ) -> np.ndarray:
-    """
-    如果坐标文件存在则直接读取；否则用 MDS 计算并保存。
-    """
+    """Load cached coordinates, or compute and save them using MDS."""
     coords_path = f"cache/npy/state_landscape_data_{map_id}_{data_id}.npy"
     if os.path.exists(coords_path):
         print(f"[MDS] load coords from {coords_path}")

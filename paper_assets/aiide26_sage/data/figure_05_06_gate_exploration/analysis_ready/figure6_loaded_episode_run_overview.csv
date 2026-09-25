@@ -1,0 +1,13 @@
+﻿scenario,method,experiment_id,eval_name,repeat,n,score_mean
+sce-1,ETG-only,sce1_etg_run_0068,eval_run_0068_web_batch_20260622_141137,repeat_001,100,52.02
+sce-1,Synergy,sce1_synergy_run_0074,eval_run_0074_web_batch_20260622_141137,repeat_001,100,61.23
+sce-1m,ETG-only,sce1m_etg_run_0071,eval_run_0071_web_batch_20260622_141137,repeat_001,100,23.43
+sce-1m,Synergy,sce1m_synergy_run_0077,eval_run_0077_web_batch_20260622_141137,repeat_001,100,42.3
+sce-2,ETG-only,sce2_etg_run_0069,eval_run_0069_web_batch_20260622_141137,repeat_001,100,73.11
+sce-2,Synergy,sce2_synergy_run_0075,eval_run_0075_web_batch_20260622_141137,repeat_001,100,77.46
+sce-2m,ETG-only,sce2m_etg_run_0072,eval_run_0072_web_batch_20260622_141137,repeat_001,100,44.7
+sce-2m,Synergy,sce2m_synergy_run_0078,eval_run_0078_web_batch_20260622_141137,repeat_001,100,57.0
+sce-3,ETG-only,sce3_etg_run_0070,eval_run_0070_web_batch_20260622_141137,repeat_001,100,55.02
+sce-3,Synergy,sce3_synergy_run_0076,eval_run_0076_web_batch_20260622_141137,repeat_001,100,66.9
+sce-3m,ETG-only,sce3m_etg_run_0073,eval_run_0073_web_batch_20260622_141137,repeat_001,100,62.13
+sce-3m,Synergy,sce3m_synergy_run_0079,eval_run_0079_web_batch_20260622_141137,repeat_001,100,62.25

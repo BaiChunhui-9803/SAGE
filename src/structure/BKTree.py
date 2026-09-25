@@ -18,9 +18,7 @@ class BKTree:
         self.root = None
 
     def find_node_by_cluster_id(self, cluster_id):
-        """
-        递归查找指定 cluster_id 的 BKTreeNode
-        """
+        """Recursively find the BKTreeNode with the requested cluster_id."""
 
         def search_node(node):
             if node.cluster_id == cluster_id:
@@ -37,9 +35,7 @@ class BKTree:
 
 
 def find_max_cluster_id(node, max_cluster_id):
-    """
-    递归查找 BKTree 中最大的 cluster_id
-    """
+    """Recursively find the maximum cluster_id in the BK-Tree."""
     if node.cluster_id > max_cluster_id[0]:
         max_cluster_id[0] = node.cluster_id
 
@@ -48,10 +44,8 @@ def find_max_cluster_id(node, max_cluster_id):
 
 
 def get_max_cluster_id(bk_tree):
-    """
-    获取 BKTree 中最大的 cluster_id
-    """
-    max_cluster_id = [0]  # 使用列表来存储最大值，以便在递归中修改
+    """Return the maximum cluster_id in the BK-Tree."""
+    max_cluster_id = [0]  # Use a mutable list so recursive calls can update the maximum.
     if bk_tree.root:
         find_max_cluster_id(bk_tree.root, max_cluster_id)
     return max_cluster_id[0]

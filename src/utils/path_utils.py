@@ -8,13 +8,15 @@ from src import ROOT_DIR
 
 def get_data_paths(cfg) -> Dict[str, Path]:
     """Get data paths from configuration."""
-    paths_config = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    paths_config = cfg.get("paths", {}) if hasattr(cfg, "get") else {}
 
     data_root = Path(
         paths_config.get(
-            "data_root", "D:/白春辉/实验平台/pymarl/results_HRL_new/Q-bktree"
+            "data_root", str(ROOT_DIR / "data")
         )
     )
+    if not data_root.is_absolute():
+        data_root = ROOT_DIR / data_root
     map_id = paths_config.get("map_id", "MarineMicro_MvsM_4")
     data_id = paths_config.get("data_id", "6")
 

@@ -133,11 +133,11 @@ def _normalize_cfg(
     cfg["storage"] = dict(cfg["storage"])
 
     cfg["game"]["map_key"] = manifest.get("map_key", cfg["game"].get("map_key", "sce-1"))
-    if manifest.get("kg_file"):
-        cfg["game"]["kg_file"] = manifest["kg_file"]
+    if manifest.get("etg_file"):
+        cfg["game"]["etg_file"] = manifest["etg_file"]
     if manifest.get("data_dir"):
         cfg["game"]["data_dir"] = manifest["data_dir"]
-    cfg["game"]["api_load_kg"] = False
+    cfg["game"]["api_load_etg"] = False
     cfg["game"]["autopilot_mode"] = cfg["game"].get("autopilot_mode", "multi_step")
 
     bktree = manifest.get("bktree") if isinstance(manifest.get("bktree"), dict) else {}
@@ -917,7 +917,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "experiment_type": manifest.get("experiment_type"),
         "map_key": manifest.get("map_key"),
         "map_id": manifest.get("map_id"),
-        "kg_file": manifest.get("kg_file"),
+        "etg_file": manifest.get("etg_file"),
         "data_dir": manifest.get("data_dir"),
         "best_trial": summary.get("best_trial"),
         "best_value": summary.get("best_value"),

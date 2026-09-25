@@ -1,20 +1,9 @@
-"""
-ActionOverrideModel -- 反事实动作覆盖模型
+"""Counterfactual action overrides for optional historical experiments.
 
-基于反事实模拟（counterfactual simulation）发现 beam search 的次优决策，
-以 (state_id, original_action) -> replacement_action 规则的形式保存，
-供 agent 运行时按置信度替换 beam search 推荐动作。
-
-数据结构:
-  _overrides: Dict[(state_id, original_action), OverrideEntry]
-
-置信度公式:
-  improvement = cf_avg_score - original_avg_score
-  improvement_normalized = sigmoid(improvement / scale_factor)
-  confidence = improvement_normalized * (1 - 1/(1 + cf_runs))
-
-持久化: pickle 格式
-"""
+Store (state_id, original_action) -> replacement_action rules learned from
+counterfactual trials. Confidence combines sigmoid-normalized score improvement
+with 1 - 1 / (1 + cf_runs). Rules are persisted with pickle.
+This optional mechanism is distinct from Full SAGE's action-tuning gates."""
 
 from __future__ import annotations
 

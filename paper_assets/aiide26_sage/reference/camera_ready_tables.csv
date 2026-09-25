@@ -1,0 +1,55 @@
+table,scenario,method,win_rate_pct,score_mean,score_std
+1,sce-1,Graph-only SAGE,100,52.02,15.56
+1,sce-1,Full SAGE,100,61.23,12.23
+1,sce-1,Replay,100,54.18,14.63
+1,sce-1m,Graph-only SAGE,81,23.43,23.81
+1,sce-1m,Full SAGE,100,42.30,8.67
+1,sce-1m,Replay,80.8,22.27,20.00
+1,sce-2,Graph-only SAGE,100,73.11,7.87
+1,sce-2,Full SAGE,100,77.46,3.75
+1,sce-2,Replay,100,74.03,6.60
+1,sce-2m,Graph-only SAGE,100,44.70,13.65
+1,sce-2m,Full SAGE,100,57.00,4.69
+1,sce-2m,Replay,88.9,35.15,27.22
+1,sce-3,Graph-only SAGE,100,55.02,17.98
+1,sce-3,Full SAGE,100,66.90,8.70
+1,sce-3,Replay,96,47.45,11.68
+1,sce-3m,Graph-only SAGE,99,62.13,15.10
+1,sce-3m,Full SAGE,100,62.25,6.95
+1,sce-3m,Replay,50.5,28.45,22.94
+2,sce-1,QMIX,100,15.18,4.99
+2,sce-1,QTRAN,99,15.93,8.50
+2,sce-1,VDN,94,10.53,10.07
+2,sce-1,RMAPPO,97,19.05,10.10
+2,sce-1,MAPPO,100,21.66,6.56
+2,sce-1,MAT,90,18.93,16.75
+2,sce-1m,QMIX,98,21.24,10.39
+2,sce-1m,QTRAN,97,28.11,13.01
+2,sce-1m,VDN,100,25.32,8.61
+2,sce-1m,RMAPPO,98,27.39,11.47
+2,sce-1m,MAPPO,100,33.63,10.34
+2,sce-1m,MAT,99,30.96,12.63
+2,sce-2,QMIX,100,38.88,11.40
+2,sce-2,QTRAN,99,39.99,9.61
+2,sce-2,VDN,100,28.47,6.39
+2,sce-2,RMAPPO,100,63.48,4.26
+2,sce-2,MAPPO,100,63.30,5.60
+2,sce-2,MAT,100,45.12,11.46
+2,sce-2m,QMIX,93,22.08,12.52
+2,sce-2m,QTRAN,100,32.82,6.74
+2,sce-2m,VDN,100,32.46,7.57
+2,sce-2m,RMAPPO,100,58.77,7.84
+2,sce-2m,MAPPO,100,59.36,4.31
+2,sce-2m,MAT,100,39.24,8.70
+2,sce-3,QMIX,98,45.00,18.85
+2,sce-3,QTRAN,96,40.95,16.42
+2,sce-3,VDN,99,37.77,14.06
+2,sce-3,RMAPPO,97,39.57,15.60
+2,sce-3,MAPPO,99,43.62,17.52
+2,sce-3,MAT,77,28.17,22.70
+2,sce-3m,QMIX,100,60.93,10.92
+2,sce-3m,QTRAN,100,55.62,13.90
+2,sce-3m,VDN,100,61.32,11.87
+2,sce-3m,RMAPPO,100,65.28,11.66
+2,sce-3m,MAPPO,87,54.99,18.08
+2,sce-3m,MAT,73,31.08,22.70

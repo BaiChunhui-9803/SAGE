@@ -1,4 +1,4 @@
-"""PredictionRTS Package"""
+"""SAGE source package."""
 
 from pathlib import Path
 import logging

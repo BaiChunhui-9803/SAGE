@@ -218,7 +218,7 @@ class Agent(base_agent.BaseAgent):
         return closest_enemy[0]
 
     def step(self, obs, env):
-        super(Agent, self).step(obs, env)
+        super(Agent, self).step(obs)
 
     def do_nothing(self, obs):
         return actions.RAW_FUNCTIONS.no_op()
@@ -1334,7 +1334,7 @@ class SmartAgent(Agent):
         return new_clusters_health_dict
 
     def _end_episode(self, obs):
-        TEST_FLAG = obs.get_test_flag()
+        TEST_FLAG = getattr(self, "_test_flag", False)
         plt.close()
         matplotlib.pyplot.figure().clear()
         matplotlib.pyplot.close()
@@ -1397,7 +1397,7 @@ class SmartAgent(Agent):
             self._end_episode(obs)
             return actions.RAW_FUNCTIONS.no_op()
 
-        TEST_FLAG = obs.get_test_flag()
+        TEST_FLAG = getattr(self, "_test_flag", False)
 
         if obs.first():
             self._termination_signaled = False

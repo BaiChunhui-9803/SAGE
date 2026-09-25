@@ -1,7 +1,7 @@
 """
 Chain Rollout — Beam-search-guided single-path rollout with unified tree structure.
 
-Uses plan_action() as the unified planning entry point (from kg_beam_search).
+Uses plan_action() as the unified planning entry point (from etg_beam_search).
 At each step, obtains beam search results, mounts the tree into a RolloutResult,
 selects an action, and advances.  The resulting tree preserves all explored
 branches for full traceability.
@@ -10,7 +10,7 @@ Usage:
     from src.decision.chain_rollout import chain_rollout, RolloutResult
 
     result = chain_rollout(
-        kg, transitions, start_state=42,
+        ETG, transitions, start_state=42,
         action_strategy="best_beam",
         score_mode="quality",
         next_state_mode="sample",
@@ -31,8 +31,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from src.decision.knowledge_graph import DecisionKnowledgeGraph
-from src.decision.kg_beam_search import (
+from src.decision.experience_transition_graph import DecisionExperienceTransitionGraph
+from src.decision.etg_beam_search import (
     BeamSearchResult,
     _compute_path_composite,
     get_beam_paths,
@@ -385,7 +385,7 @@ def _advance_to_next_state(
     chosen_action: str,
     chosen_next_state: int,
     chosen_trans_prob: float,
-    kg: DecisionKnowledgeGraph,
+    ETG: DecisionExperienceTransitionGraph,
     transitions: Dict[int, Dict[str, Dict]],
     next_id: int,
     cum_prob: float,
@@ -393,7 +393,7 @@ def _advance_to_next_state(
     visited_counts: Dict[int, int],
     is_on_chosen_path: bool = True,
 ) -> Tuple[int, int, float]:
-    quality = kg.get_action_quality(current_state, chosen_action)
+    quality = ETG.get_action_quality(current_state, chosen_action)
     qs = quality.get("quality_score", 0.0) if quality else 0.0
     wr = quality.get("win_rate", 0.0) if quality else 0.0
     afr = quality.get("avg_future_reward", 0.0) if quality else 0.0
@@ -477,7 +477,7 @@ def _execute_single_action(
 
 
 def _chain_rollout_single_step(
-    kg: DecisionKnowledgeGraph,
+    ETG: DecisionExperienceTransitionGraph,
     transitions: Dict[int, Dict[str, Dict]],
     start_state: int,
     result: RolloutResult,
@@ -511,7 +511,7 @@ def _chain_rollout_single_step(
             break
 
         plan = plan_action(
-            kg,
+            ETG,
             transitions,
             current_state,
             beam_width=beam_width,
@@ -594,7 +594,7 @@ def _chain_rollout_single_step(
             chosen_action,
             chosen_next_state,
             chosen_trans_prob,
-            kg,
+            ETG,
             transitions,
             next_id,
             cum_prob,
@@ -614,7 +614,7 @@ def _chain_rollout_single_step(
 
 
 def _chain_rollout_multi_step(
-    kg: DecisionKnowledgeGraph,
+    ETG: DecisionExperienceTransitionGraph,
     transitions: Dict[int, Dict[str, Dict]],
     start_state: int,
     result: RolloutResult,
@@ -653,7 +653,7 @@ def _chain_rollout_multi_step(
             break
 
         plan = plan_action(
-            kg,
+            ETG,
             transitions,
             current_state,
             beam_width=beam_width,
@@ -760,7 +760,7 @@ def _chain_rollout_multi_step(
                 chosen_action,
                 chosen_next_state,
                 chosen_trans_prob,
-                kg,
+                ETG,
                 transitions,
                 next_id,
                 cum_prob,
@@ -838,7 +838,7 @@ def _chain_rollout_multi_step(
                             rem_action,
                             rem_ns,
                             rem_tp,
-                            kg,
+                            ETG,
                             transitions,
                             next_id,
                             cum_prob,
@@ -891,7 +891,7 @@ def _chain_rollout_multi_step(
 
 
 def chain_rollout(
-    kg: DecisionKnowledgeGraph,
+    ETG: DecisionExperienceTransitionGraph,
     transitions: Dict[int, Dict[str, Dict]],
     start_state: int,
     score_mode: str = "quality",
@@ -933,7 +933,7 @@ def chain_rollout(
 
     if rollout_mode == "multi_step":
         return _chain_rollout_multi_step(
-            kg,
+            ETG,
             transitions,
             start_state,
             result,
@@ -957,7 +957,7 @@ def chain_rollout(
         )
 
     return _chain_rollout_single_step(
-        kg,
+        ETG,
         transitions,
         start_state,
         result,

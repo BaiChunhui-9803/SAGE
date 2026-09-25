@@ -1,2 +1,2 @@
-"""Adapters for external policy outputs and ETG-compatible data."""
+"""Adapters for external policy outputs and etg-compatible data."""
 

@@ -1,0 +1,18 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.pkl filter=lfs diff=lfs merge=lfs -text
+*.npz filter=lfs diff=lfs merge=lfs -text
+*.npy filter=lfs diff=lfs merge=lfs -text
+*.gz filter=lfs diff=lfs merge=lfs -text
+*.SC2Map filter=lfs diff=lfs merge=lfs -text
+
+# Frozen provenance hashes cover original bytes, including original newlines.
+# Prevent core.autocrlf from changing archived CSV/JSON/TXT on clone/checkout.
+/paper_assets/aiide26_sage/data/** -text
+/paper_assets/aiide26_sage/raw/** -text
+/paper_assets/aiide26_sage/reference/** -text
+/paper_assets/aiide26_sage/scripts/legacy/** -text
+/cache/experience_transition_graph/** -text
+/data/** -text
+/src/data/*.py -text

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.decision.kg_beam_search import BeamSearchResult
+from src.decision.etg_beam_search import BeamSearchResult
 
 
 @dataclass

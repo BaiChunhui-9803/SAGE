@@ -432,8 +432,8 @@ def _copy_bktree_to_data_dir(bktree_dir: Path, data_dir: Path) -> int:
     return count
 
 
-def _copy_runtime_sparse_index(kg_dir: Path, map_id: str, data_id: str) -> Optional[str]:
-    candidates = [kg_dir / "sparse_neighbors.pkl", kg_dir / "npy" / "sparse_neighbors.pkl"]
+def _copy_runtime_sparse_index(etg_dir: Path, map_id: str, data_id: str) -> Optional[str]:
+    candidates = [etg_dir / "sparse_neighbors.pkl", etg_dir / "npy" / "sparse_neighbors.pkl"]
     src = next((path for path in candidates if path.exists()), None)
     if src is None:
         return None
@@ -455,10 +455,10 @@ def _write_prepared_pickle(path: Path, episodes: Sequence[Dict[str, Any]]) -> No
             pickle.dump(ep, f)
 
 
-def _relative_to_cache_kg(path: Path) -> str:
-    kg_root = ROOT_DIR / "cache" / "knowledge_graph"
+def _relative_to_cache_etg(path: Path) -> str:
+    etg_root = ROOT_DIR / "cache" / "experience_transition_graph"
     try:
-        return str(path.relative_to(kg_root)).replace("\\", "/")
+        return str(path.relative_to(etg_root)).replace("\\", "/")
     except ValueError:
         return str(path).replace("\\", "/")
 
@@ -467,22 +467,22 @@ def _register_catalog_entry(
     name: str,
     map_id: str,
     data_id: str,
-    kg_dir: Path,
+    etg_dir: Path,
     data_dir: Path,
     description: str,
     overwrite: bool,
 ) -> None:
-    catalog_path = ROOT_DIR / "configs" / "kg_catalog.yaml"
+    catalog_path = ROOT_DIR / "configs" / "etg_catalog.yaml"
     if catalog_path.exists():
         with open(str(catalog_path), "r", encoding="utf-8") as f:
             catalog = yaml.safe_load(f) or {}
     else:
         catalog = {}
-    entries = catalog.setdefault("knowledge_graphs", [])
+    entries = catalog.setdefault("experience_transition_graphs", [])
     entry = {
         "name": name,
-        "file": f"{_relative_to_cache_kg(kg_dir)}/kg_simple.pkl",
-        "transitions": f"{_relative_to_cache_kg(kg_dir)}/kg_simple_transitions.pkl",
+        "file": f"{_relative_to_cache_etg(etg_dir)}/etg_simple.pkl",
+        "transitions": f"{_relative_to_cache_etg(etg_dir)}/etg_simple_transitions.pkl",
         "data_dir": str(data_dir.relative_to(ROOT_DIR)).replace("\\", "/"),
         "type": "teacher_guided",
         "context_window": 0,
@@ -512,14 +512,14 @@ def _archive_teacher_build(
     source_run_id: str,
     checkpoint_path: str,
     teacher_episodes: int,
-    kg_name: str,
-    kg_dir: Path,
+    etg_name: str,
+    etg_dir: Path,
     data_dir: Path,
     bktree_dir: Path,
     summary: Dict[str, Any],
     overwrite: bool,
 ) -> Path:
-    exp_dir = ROOT_DIR / "output" / "learner_results" / "all_data" / "Teacher-guided-ETG" / experiment_id
+    exp_dir = ROOT_DIR / "output" / "learner_results" / "all_data" / "Teacher-guided-etg" / experiment_id
     if exp_dir.exists() and not overwrite:
         raise FileExistsError(f"archive directory already exists: {exp_dir}")
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -530,9 +530,9 @@ def _archive_teacher_build(
         "map_id": map_id,
         "experiment_type": "teacher_guided_etg_build",
         "method": f"Teacher-guided ETG ({teacher_method.upper()} projected-script)",
-        "kg_name": kg_name,
-        "kg_file": f"{_relative_to_cache_kg(kg_dir)}/kg_simple.pkl",
-        "transitions": f"{_relative_to_cache_kg(kg_dir)}/kg_simple_transitions.pkl",
+        "etg_name": etg_name,
+        "etg_file": f"{_relative_to_cache_etg(etg_dir)}/etg_simple.pkl",
+        "transitions": f"{_relative_to_cache_etg(etg_dir)}/etg_simple_transitions.pkl",
         "data_dir": str(data_dir.relative_to(ROOT_DIR)).replace("\\", "/"),
         "dataset_type": "teacher_guided",
         "replay_dataset_expansion": True,
@@ -607,11 +607,11 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
     output_dir = _resolve_root_path(args.output_dir) if args.output_dir else (
         ROOT_DIR
         / "cache"
-        / "knowledge_graph"
+        / "experience_transition_graph"
         / f"{args.map_id}_{_sanitize_name(args.teacher_method)}_teacher_projected"
     )
-    if output_dir.exists() and not args.overwrite and (output_dir / "kg_simple.pkl").exists():
-        raise FileExistsError(f"KG output already exists; use --overwrite: {output_dir}")
+    if output_dir.exists() and not args.overwrite and (output_dir / "etg_simple.pkl").exists():
+        raise FileExistsError(f"ETG output already exists; use --overwrite: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data_dir = ROOT_DIR / "data" / args.map_id / args.data_id
@@ -643,7 +643,7 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
         output_dir=output_dir,
         unique_states=set(state_to_node.values()),
     )
-    kg = bfc.build_knowledge_graph(
+    ETG = bfc.build_experience_transition_graph(
         state_episodes=state_episodes,
         action_episodes=action_episodes,
         reward_episodes=reward_episodes,
@@ -651,7 +651,7 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
         output_dir=output_dir,
     )
     if args.validate:
-        bfc.validate_knowledge_graph(kg)
+        bfc.validate_experience_transition_graph(ETG)
 
     dense_ready = False
     skip_dense = args.skip_distance_matrix or (
@@ -671,14 +671,14 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
             str(bktree_dir),
             output_dir,
             node_to_state,
-            bfc.collect_state_visits(kg),
+            bfc.collect_state_visits(ETG),
             top_k=args.sparse_top_k,
             max_source_states=args.sparse_max_source_states,
             max_candidates_per_primary=args.sparse_max_candidates_per_primary,
         )
     sparse_runtime_path = _copy_runtime_sparse_index(output_dir, args.map_id, args.data_id)
 
-    kg_name = args.kg_name or f"{args.map_id} - Teacher {args.teacher_method.upper()} Projected"
+    etg_name = args.etg_name or f"{args.map_id} - Teacher {args.teacher_method.upper()} Projected"
     summary = {
         "map_id": args.map_id,
         "map_key": args.map_key,
@@ -709,7 +709,7 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
 
     if args.register_catalog:
         _register_catalog_entry(
-            kg_name,
+            etg_name,
             args.map_id,
             args.data_id,
             output_dir,
@@ -728,7 +728,7 @@ def build_teacher_guided_etg(args: argparse.Namespace) -> Dict[str, Any]:
             args.source_run_id,
             args.checkpoint_path,
             len(teacher_episodes),
-            kg_name,
+            etg_name,
             output_dir,
             data_dir,
             bktree_dir,
@@ -762,7 +762,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-teacher-episodes", type=int, default=0, help="0 means all")
     parser.add_argument("--data-id", default=None)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--kg-name", default="")
+    parser.add_argument("--etg-name", default="")
     parser.add_argument("--experiment-id", default="")
     parser.add_argument("--primary-threshold", type=float, default=1.0)
     parser.add_argument("--secondary-threshold", type=float, default=0.5)

@@ -1,0 +1,75 @@
+{
+  "beam_width": 6,
+  "lookahead_steps": 5,
+  "score_mode": "win_rate",
+  "action_strategy": "best_subtree_winrate",
+  "mode": "multi_step",
+  "min_visits": 8,
+  "max_state_revisits": 4,
+  "min_cum_prob": 0.01928489717057676,
+  "discount_factor": 0.63894477921123,
+  "enable_backup": false,
+  "backup_score_threshold": 0.3,
+  "backup_distance_threshold": 0.2,
+  "epsilon": 0.1,
+  "masked_actions": [
+    "0k",
+    "1k",
+    "2k",
+    "3k",
+    "4k"
+  ],
+  "tuning_ood_key_mode": "aggregate",
+  "tuning_ood_distance_bucket": 0.5,
+  "synergy_etg_source_trial": 6,
+  "synergy_etg_source_value": 55.885714285714286,
+  "enable_action_tuning": true,
+  "tuning_force_explore": false,
+  "tuning_explore_ood": false,
+  "tuning_etg_first": true,
+  "tuning_etg_protected_sources": [
+    "kg_plan",
+    "kg_follow"
+  ],
+  "exclude_from_parameter_optimization": false,
+  "tuning_explore_rate": 0.0,
+  "tuning_explore_sources": [],
+  "tuning_validation_sources": [
+    "ood",
+    "fallback",
+    "kg_relaxed",
+    "fuzzy_plan",
+    "diverge"
+  ],
+  "tuning_validation_min_confidence": 0.1,
+  "tuning_validation_min_advantage": 0.0,
+  "tuning_validation_min_visits": 2,
+  "tuning_validation_profiles": {
+    "diverge": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "fallback": {
+      "min_advantage": 0.0,
+      "min_confidence": 0.08,
+      "min_visits": 2
+    },
+    "fuzzy_plan": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "kg_relaxed": {
+      "min_advantage": 0.5,
+      "min_confidence": 0.15,
+      "min_visits": 3
+    },
+    "ood": {
+      "min_advantage": 0.0,
+      "min_confidence": 0.08,
+      "min_visits": 2
+    }
+  },
+  "phase": "synergy"
+}

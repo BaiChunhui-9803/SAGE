@@ -17,7 +17,7 @@ htmlcov/
 
 # Local environments and editor settings
 .env
-.venv/
+.venv*/
 .venv_figures/
 env/
 venv/
@@ -28,13 +28,16 @@ ENV/
 *.swo
 
 # Generated runtime artifacts and large research data.
-# Curated baseline artifacts are force-added deliberately at release time.
-output/
-cache/
-data/
-datas/
-backup/
+# Curated evidence and graph/state assets are included explicitly; local outputs stay ignored.
+/output/
+/cache/*
+!/cache/experience_transition_graph/
+/data/*
+!/data/MarineMicro_MvsM_*/
+/datas/
+/backup/
 *.npy
+!/paper_assets/aiide26_sage/data/**/*.npy
 *.pth
 *.pt
 *.ckpt
@@ -49,8 +52,8 @@ tex/
 papers/
 slides/
 figures/
-docs/
-doc/
+/docs/
+/doc/
 tmp_submission_check/
 tmp_tex_check/
 *.aux
@@ -88,6 +91,7 @@ scripts/run_switch_*.py
 scripts/select_*.py
 scripts/update_onpolicy_*.py
 scripts/validate_final_*.py
+!scripts/validate_final_eval_start_state.py
 scripts/visualize_planning_*.py
 scripts/run_adaptive_agent.py
 scripts/run_collect_data.py
@@ -96,6 +100,23 @@ scripts/test_smart_agent.py
 scripts/cleanup_orphan_predictionrts_processes.py
 
 # Machine-specific settings and OS files
+# Author-side manual review tools/records are not paper runtime assets.
+/AGENTS.md
+/ARTIFACT_REVIEW_PLAYBOOK.md
+/SAGE_REVIEW_CHECKLIST.html
+/SAGE_REVIEW_CHECKLIST.md
+/Open_SAGE_Checklist.cmd
+/tools/review_*.py
+/tools/REVIEW_WORKFLOW.md
+/ARTIFACT_AUDIT_*.md
+/ARTIFACT_VALIDATION.md
+/VALIDATION.md
+/scripts/cf_candidate_methods.py
+/scripts/cf_episode_agreement.py
+/scripts/experiment_cf_method_comparison.py
+/ARCHITECTURE.md
+/ARTIFACT_RELEASE_REVIEW.md
+/requirements-sc2-reference.txt
 configs/paths.yaml
 nul
 .DS_Store
@@ -105,3 +126,4 @@ _check.js
 codex-*-config.*
 项目总结报告.md
 项目实验架构总结.md
+!scripts/fuse_bktree_state_sequences.py

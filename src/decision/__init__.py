@@ -1,8 +1,5 @@
-"""
-Decision module for optimal action selection
-"""
+"""SAGE graph planning, switch-aware rollout, and gated action-value models.
 
-from .selector import OptimalActionSelector
-from .evaluator import DecisionEvaluator
-
-__all__ = ["OptimalActionSelector", "DecisionEvaluator"]
+Import the required implementation module explicitly to avoid eager loading of
+optional live-environment dependencies during offline evidence inspection.
+"""

@@ -1,14 +1,9 @@
-"""
-GameBridge — 进程间通信桥接层（精简版）
+"""Communication bridge between the SAGE agent and the optional Web API.
 
-游戏进程自主决策后，仅通过以下通道与 bridge_server 通信：
-    event_queue:    Agent → API   (胜负/episode事件)
-    control_queue:  API  → Agent  (暂停/恢复/停止)
-    status_queue:   Agent → API   (状态增量更新，每N帧推送)
-    history_queue:  Agent → API   (对局记录，每N局批量推送)
-    param_update_queue: API → Agent (beam参数热更新)
-    param_confirm_queue: Agent → API  (参数确认回传)
-"""
+event_queue carries episode events; control_queue carries pause/resume/stop;
+status_queue carries periodic state updates; history_queue carries episode
+records; param_update_queue and param_confirm_queue carry parameter changes
+and acknowledgements. Standalone evaluations disable outbound publication."""
 
 import time
 from multiprocessing import Queue, Event
@@ -16,7 +11,11 @@ from typing import Any, Dict, List, Optional
 
 
 class GameBridge:
-    def __init__(self):
+    def __init__(self, publish=True):
+        # Standalone evaluations have no API consumer. Publishing large episode
+        # payloads would block multiprocessing queue feeders during shutdown.
+        # The agent writes its authoritative episode logs directly to disk.
+        self.publish = publish
         self.event_queue: Queue = Queue()
         self.control_queue: Queue = Queue(maxsize=1)
         self.status_queue: Queue = Queue(maxsize=100)
@@ -29,6 +28,8 @@ class GameBridge:
     # ---- Agent → API ----
 
     def put_event(self, event_dict: Dict[str, Any]) -> None:
+        if not self.publish:
+            return
         try:
             self.event_queue.put_nowait(event_dict)
         except Exception:
@@ -43,9 +44,11 @@ class GameBridge:
             pass
         return events
 
-    # ---- status (Agent → API, 增量式) ----
+    # Agent -> API: incremental status updates.
 
     def update_status(self, **kwargs) -> None:
+        if not self.publish:
+            return
         try:
             self.status_queue.put_nowait(kwargs)
         except Exception:
@@ -104,9 +107,11 @@ class GameBridge:
             return True
         return False
 
-    # ---- Agent → API (episode history, 批量) ----
+    # Agent -> API: batched episode history.
 
     def put_history(self, episode_data: Dict[str, Any]) -> None:
+        if not self.publish:
+            return
         try:
             self.history_queue.put_nowait(episode_data)
         except Exception:
@@ -128,6 +133,8 @@ class GameBridge:
     # ---- Param Confirm (Agent → API) ----
 
     def confirm_params(self, trial_number: int) -> None:
+        if not self.publish:
+            return
         try:
             if not self.param_confirm_queue.empty():
                 self.param_confirm_queue.get_nowait()

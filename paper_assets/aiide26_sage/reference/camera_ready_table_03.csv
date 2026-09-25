@@ -1,0 +1,9 @@
+measure,unit,Graph-only SAGE,Full SAGE,evidence
+Average callback time,ms,36.96,34.88,paper transcription only; not independently reproduced
+Callbacks within observation interval,percent,100,100,paper transcription only; not independently reproduced
+Switch-Aware planning (new plan),ms,12.42,15.7,paper transcription only; not independently reproduced
+Graph-plan following,ms,5.06,7.5,paper transcription only; not independently reproduced
+Switch-Aware backup switching,ms,5.86,4.85,paper transcription only; not independently reproduced
+Graph recovery,ms,11.45,10.97,paper transcription only; not independently reproduced
+Post-divergence replanning,ms,16.65,14.88,paper transcription only; not independently reproduced
+Uncertain-state path,ms,43.65,38.81,paper transcription only; not independently reproduced
