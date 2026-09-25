@@ -5,8 +5,8 @@ Run `python scripts/reproduce_paper.py --figure all` from the source checkout. O
 | Paper item | Inputs here | Operation |
 |---|---|---|
 | Figures 1–2 | `reference/fig1_architecture.png`, `fig2_sce*.pdf` | Static camera-ready illustrations |
-| Figure 3 | `data/figure_03_parameter_correlation/`: trials, studies, correlations | Recompute 300 correlations; `--figure 3` |
-| Figure 4 | `data/figure_04_backup_switch/`: switching comparisons and selected groups | Recompute 124 filtered rows; `--figure 4` |
+| Figure 3 | `data/figure_03_parameter_correlation/`: trials, studies, correlations | Recompute correlations; `--figure 3` |
+| Figure 4 | `data/figure_04_backup_switch/`: switching comparisons and selected groups | Recompute filtered rows; `--figure 4` |
 | Figure 5a | `data/figure_05_06_gate_exploration/selection/`, `raw/evaluations/` | Frozen episode IDs; `--figure 5a` |
 | Figure 5b | Same logs and `branch_case/` | sce-2 Graph-only episode 272 / Full episode 23; `--figure 5b` |
 | Figure 6 | Same logs, selection and `analysis_ready/` | Rebuild state aggregates; `--figure 6` |
